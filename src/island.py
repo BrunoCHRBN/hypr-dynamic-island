@@ -46,6 +46,7 @@ import json
 import locale
 import math
 import os
+import random
 import signal
 import socket
 import subprocess
@@ -55,6 +56,7 @@ import time
 import tomllib
 import urllib.parse
 import urllib.request
+import cairo
 
 try:
     locale.setlocale(locale.LC_TIME, "")
@@ -90,7 +92,7 @@ def cursor_pos() -> tuple[int, int] | None:
     rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     try:
         s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        s.settimeout(0.4)
+        s.settimeout(0.02)
         s.connect(f"{rt}/hypr/{sig}/.socket.sock")
         s.sendall(b"cursorpos")
         x, y = s.recv(256).decode().strip().split(",")
@@ -121,6 +123,256 @@ def monitor_por_nome(nome):
         except Exception:
             continue
     return None
+
+def obter_refresh_rate(nome: str) -> float:
+    """Taxa de atualização em Hz do monitor configurado, ou 60.0 se não determinado."""
+    try:
+        m = monitor_por_nome(nome)
+        if m is not None:
+            rr = m.get_refresh_rate()
+            if rr > 0:
+                return rr / 1000.0
+    except Exception:
+        pass
+    return 60.0
+
+
+class Mola:
+    """Mola física interrompível (oscilador harmônico amortecido).
+
+    Preserva posição (x) e velocidade (v) ao mudar de alvo, permitindo
+    interrupções fluidas sem saltos de aceleração ou velocidade zerada.
+    """
+
+    def __init__(self, valor: float, resposta: float = 0.42, amortecimento: float = 0.75):
+        self.x = self.alvo = float(valor)
+        self.v = 0.0
+        self.resposta = resposta
+        self.amortecimento = amortecimento
+        self.k = 0.0
+        self.c = 0.0
+        self.reconfigurar(resposta, amortecimento)
+
+    def reconfigurar(self, resposta: float, amortecimento: float) -> None:
+        """Ajusta o período natural (resposta em s) e razão de amortecimento (zeta)."""
+        self.resposta = max(0.01, float(resposta))
+        self.amortecimento = max(0.0, float(amortecimento))
+        self.k = (2.0 * math.pi / self.resposta) ** 2
+        self.c = 2.0 * self.amortecimento * math.sqrt(self.k)
+
+    def ir_para(self, alvo: float) -> None:
+        """Altera o alvo preservando a posição e a velocidade atuais."""
+        self.alvo = float(alvo)
+
+    def passo(self, dt: float) -> bool:
+        """Avança a simulação temporal por dt segundos. Retorna True quando assentou."""
+        if dt <= 0:
+            return abs(self.x - self.alvo) < 0.25 and abs(self.v) < 1.5
+        dt = min(dt, 1.0 / 30.0)  # Protege contra saltos/engasgos
+        n = int(dt / 0.004) + 1
+        h = dt / n
+        for _ in range(n):
+            self.v += (-self.k * (self.x - self.alvo) - self.c * self.v) * h
+            self.x += self.v * h
+        if abs(self.x - self.alvo) < 0.25 and abs(self.v) < 1.5:
+            self.x = self.alvo
+            self.v = 0.0
+            return True
+        return False
+
+
+class EqualizadorArea(Gtk.DrawingArea):
+    """Visualizador de equalizador de áudio vetorial (Cairo) com 4 barras arredondadas fluidas.
+
+    Cada barra possui sua própria mola física independente (resposta ~0.18s, amortecimento ~0.72)
+    que reage dinamicamente simulando a batida da música a 144Hz.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_name("eq-area")
+        self.set_size_request(22, 16)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_halign(Gtk.Align.CENTER)
+
+        # 4 barras com molas físicas independentes
+        self._molas = [
+            Mola(0.20, resposta=0.18, amortecimento=0.72),
+            Mola(0.20, resposta=0.16, amortecimento=0.70),
+            Mola(0.20, resposta=0.19, amortecimento=0.75),
+            Mola(0.20, resposta=0.17, amortecimento=0.72),
+        ]
+        self._alvos_tempo = 0.0
+        self._cor_rgb = (0.796, 0.651, 0.969)  # Mauve Catppuccin padrão (203, 166, 247)
+        self._ativo = False
+        self._pausado = False
+        self._mudo = False
+        self._tick_id = 0
+        self._ult_t = None
+
+        self.set_draw_func(self._desenhar)
+
+    def definir_cor(self, r: int, g: int, b: int) -> None:
+        """Ajusta a cor das barras com a cor dominante da capa."""
+        self._cor_rgb = (r / 255.0, g / 255.0, b / 255.0)
+        self.queue_draw()
+
+    def definir_estado(self, ativo: bool, pausado: bool = False, mudo: bool = False) -> None:
+        """Atualiza estado do player (tocando, pausado, mudo)."""
+        self._ativo = ativo
+        self._pausado = pausado
+        self._mudo = mudo
+
+        if ativo and not pausado and not mudo:
+            if not self._tick_id:
+                self._ult_t = None
+                try:
+                    self._tick_id = self.add_tick_callback(self._passo)
+                except Exception:
+                    self._tick_id = 0
+        else:
+            # Em pausa ou mudo: direciona suavemente as barras para repouso
+            alvo = 0.20 if pausado else (0.10 if mudo else 0.0)
+            for m in self._molas:
+                m.ir_para(alvo)
+            if not self._tick_id:
+                self._ult_t = None
+                try:
+                    self._tick_id = self.add_tick_callback(self._passo)
+                except Exception:
+                    self._tick_id = 0
+
+    def _passo(self, _widget, clock) -> bool:
+        t = (clock.get_frame_time() / 1e6) if clock is not None else time.monotonic()
+        dt = 0.0 if self._ult_t is None else t - self._ult_t
+        self._ult_t = t
+        dt = min(dt, 1.0 / 30.0)
+
+        # Se tocando, gera metas de altura dinâmicas a cada ~110 ms
+        if self._ativo and not self._pausado and not self._mudo:
+            if t - self._alvos_tempo > 0.11:
+                self._alvos_tempo = t
+                padroes = [
+                    (0.85, 0.45, 0.95, 0.60),
+                    (0.40, 0.90, 0.55, 0.85),
+                    (0.70, 0.35, 0.80, 0.50),
+                    (0.95, 0.75, 0.40, 0.90),
+                    (0.50, 0.85, 0.70, 0.35),
+                ]
+                idx = int((t * 9) % len(padroes))
+                base = padroes[idx]
+                for i, m in enumerate(self._molas):
+                    jitter = random.uniform(-0.08, 0.08)
+                    m.ir_para(max(0.18, min(1.0, base[i] + jitter)))
+
+        todas_assentadas = True
+        for m in self._molas:
+            assentou = m.passo(dt)
+            if not assentou:
+                todas_assentadas = False
+
+        self.queue_draw()
+
+        # Encerra o tick callback se estiver pausado/mudo e todas as molas assentaram
+        if (not self._ativo or self._pausado or self._mudo) and todas_assentadas:
+            self._tick_id = 0
+            self._ult_t = None
+            return GLib.SOURCE_REMOVE
+
+        return GLib.SOURCE_CONTINUE
+
+    def _desenhar(self, _area, cr, largura: int, altura: int) -> None:
+        n_barras = 4
+        espacamento = 2.0
+        largura_barra = (largura - (n_barras - 1) * espacamento) / n_barras
+        raio = largura_barra / 2.0
+        r, g, b = self._cor_rgb
+
+        cr.set_source_rgba(r, g, b, 0.95)
+
+        for i, mola in enumerate(self._molas):
+            frac = max(0.15, min(1.0, mola.x))
+            h_barra = max(largura_barra, frac * (altura - 2.0))
+            x = i * (largura_barra + espacamento)
+            y = altura - 1.0 - h_barra
+
+            cr.new_sub_path()
+            cr.arc(x + largura_barra - raio, y + raio, raio, -math.pi / 2, 0)
+            cr.arc(x + largura_barra - raio, y + h_barra - raio, raio, 0, math.pi / 2)
+            cr.arc(x + raio, y + h_barra - raio, raio, math.pi / 2, math.pi)
+            cr.arc(x + raio, y + raio, raio, math.pi, 3 * math.pi / 2)
+            cr.close_path()
+            cr.fill()
+
+
+class AnelProgresso(Gtk.DrawingArea):
+    """Anel circular de progresso vetorial (Cairo) para Timer e Atividades ao Vivo."""
+
+    def __init__(self, raio: float = 7.0, largura_linha: float = 2.0) -> None:
+        super().__init__()
+        self.set_name("anel-progresso")
+        tamanho = int((raio + largura_linha) * 2 + 4)
+        self.set_size_request(tamanho, tamanho)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_halign(Gtk.Align.CENTER)
+        self._raio = raio
+        self._largura_linha = largura_linha
+        self._mola = Mola(0.0, resposta=0.25, amortecimento=0.82)
+        self._progresso = 0.0
+        self._cor_rgb = (0.796, 0.651, 0.969)
+        self._tick_id = 0
+        self._ult_t = None
+        self.set_visible(False)
+        self.set_draw_func(self._desenhar)
+
+    def definir_cor(self, r: int, g: int, b: int) -> None:
+        self._cor_rgb = (r / 255.0, g / 255.0, b / 255.0)
+        self.queue_draw()
+
+    def definir_progresso(self, valor: float | None) -> None:
+        if valor is None:
+            self._progresso = 0.0
+            self.set_visible(False)
+            return
+        self.set_visible(True)
+        self._progresso = max(0.0, min(1.0, float(valor)))
+        self._mola.ir_para(self._progresso)
+        if not self._tick_id:
+            self._ult_t = None
+            try:
+                self._tick_id = self.add_tick_callback(self._passo)
+            except Exception:
+                self._tick_id = 0
+
+    def _passo(self, _widget, clock) -> bool:
+        t = (clock.get_frame_time() / 1e6) if clock is not None else time.monotonic()
+        dt = 0.0 if self._ult_t is None else t - self._ult_t
+        self._ult_t = t
+        assentou = self._mola.passo(min(dt, 1.0 / 30.0))
+        self.queue_draw()
+        if assentou:
+            self._tick_id = 0
+            self._ult_t = None
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _desenhar(self, _area, cr, w: int, h: int) -> None:
+        cx, cy = w / 2.0, h / 2.0
+        cr.set_line_width(self._largura_linha)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+
+        # Trilha de fundo
+        cr.arc(cx, cy, self._raio, 0, 2 * math.pi)
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.15)
+        cr.stroke()
+
+        # Arco de progresso
+        p = max(0.0, min(1.0, self._mola.x))
+        if p > 0.001:
+            cr.arc(cx, cy, self._raio, -math.pi / 2.0, -math.pi / 2.0 + 2.0 * math.pi * p)
+            r, g, b = self._cor_rgb
+            cr.set_source_rgba(r, g, b, 0.95)
+            cr.stroke()
 
 
 LARGURA = 340                       # com mídia (capa + título + controles)
@@ -219,6 +471,7 @@ class Mpris:
         # mesmo nome de barramento quando o app do celular muda ("YouTube -
         # Galaxy A15 5G" -> "Spotify - ..."), então a chave inclui a faixa.
         self._ident: tuple[tuple[str, str], str] | None = None
+        self._ident_cache: dict[tuple[str, str], str] = {}
         self._desktop_entry_cache: dict[str, str] = {}
         self._pos_base_us: int = 0
         self._pos_timestamp: float = time.monotonic()
@@ -246,6 +499,8 @@ class Mpris:
                 if not _new:
                     self._proxies.pop(nome, None)
                     self._desktop_entry_cache.pop(nome, None)
+                    if hasattr(self, "_ident_cache"):
+                        self._ident_cache = {k: v for k, v in self._ident_cache.items() if k[0] != nome}
                 GLib.idle_add(self.escolher)
         except Exception:
             pass
@@ -406,16 +661,21 @@ class Mpris:
         if not self.nome:
             return ""
         chave = (self.nome, titulo)
+        if hasattr(self, "_ident_cache") and chave in self._ident_cache:
+            return self._ident_cache[chave]
         if self._ident is not None and self._ident[0] == chave:
             return self._ident[1]
         try:
             r = self.bus.call_sync(
                 self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Get",
                 GLib.Variant("(ss)", ("org.mpris.MediaPlayer2", "Identity")),
-                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 200, None)
+                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 20, None)
             valor = str(r.unpack()[0] or "").strip()
         except GLib.Error:
             valor = ""
+        if not hasattr(self, "_ident_cache"):
+            self._ident_cache = {}
+        self._ident_cache[chave] = valor
         self._ident = (chave, valor)
         return valor
 
@@ -1423,6 +1683,18 @@ class Ilha:
         self._h_colapsada = None    # valor medido da cápsula recolhida em tempo de execução
         self._anim_src = 0
         self._tick_id = 0
+        self._taxa_hz = obter_refresh_rate(MONITOR)
+        self._mola_w = Mola(LARGURA_VAZIA, resposta=0.32, amortecimento=0.92)
+        self._mola_h = Mola(ALTURA_CABECALHO, resposta=0.32, amortecimento=0.92)
+        self._ult_frame_time = None
+        self._ultimo_w = None
+        self._ultimo_h = None
+        self._cor_dinamica_pendente = None
+        self._historico_cache = []
+        self._carregando_historico = False
+        self._mola_vol = Mola(0.0, resposta=0.22, amortecimento=0.82)
+        self._vol_tick_id = 0
+        self._ult_t_vol = None
         self._hud_ativo = False
         self._hud_timer = 0
         self._notif_ativa = False
@@ -1455,9 +1727,11 @@ class Ilha:
         self.titulo.set_xalign(0)
         self.titulo.set_hexpand(True)
 
-        self.eq_lbl = Gtk.Label(label="▃▅▃")
+        self.eq_area = EqualizadorArea()
+        self.eq_lbl = Gtk.Label(label="")
         self.eq_lbl.set_name("eq")
         self.eq_lbl.set_visible(False)
+        self.anel_progresso = AnelProgresso(raio=6.5, largura_linha=2.0)
 
         self.relogio = Gtk.Label(label="")
         self.relogio.set_name("relogio")
@@ -1558,21 +1832,61 @@ class Ilha:
         self.rec_indicador.set_tooltip_text("Gravação de tela em andamento")
         self.rec_indicador.set_visible(False)
 
+        # -- Slots do Cabeçalho com Crossfade -------------------------------
+        self.slot_leading = Gtk.Stack()
+        self.slot_leading.set_name("slot-leading")
+        self.slot_leading.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.slot_leading.set_transition_duration(180)
+        self.slot_leading.set_valign(Gtk.Align.CENTER)
+
+        leading_vazio = Gtk.Box()
+        self.slot_leading.add_named(leading_vazio, "vazio")
+        self.slot_leading.add_named(self.dots, "dots")
+        self.slot_leading.add_named(self.capa, "capa")
+
+        ativ_leading_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        ativ_leading_box.append(self.anel_progresso)
+        ativ_leading_box.append(self.ativ_box)
+        self.slot_leading.add_named(ativ_leading_box, "atividade")
+
+        self.slot_center = Gtk.Stack()
+        self.slot_center.set_name("slot-center")
+        self.slot_center.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.slot_center.set_transition_duration(180)
+        self.slot_center.set_valign(Gtk.Align.CENTER)
+        self.slot_center.set_hexpand(True)
+
+        center_vazio = Gtk.Box()
+        self.slot_center.add_named(center_vazio, "vazio")
+        self.slot_center.add_named(self.titulo, "titulo")
+        self.slot_center.add_named(self.hud_box, "hud")
+        self.slot_center.add_named(self.notif_box, "notif")
+
+        self.slot_trailing = Gtk.Stack()
+        self.slot_trailing.set_name("slot-trailing")
+        self.slot_trailing.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.slot_trailing.set_transition_duration(180)
+        self.slot_trailing.set_valign(Gtk.Align.CENTER)
+
+        trailing_relogio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        trailing_relogio_box.append(self.mic_indicador)
+        trailing_relogio_box.append(self.rec_indicador)
+        trailing_relogio_box.append(self.relogio)
+        trailing_relogio_box.append(self.dnd_icone)
+        trailing_relogio_box.append(self.pin_icone)
+
+        trailing_vazio = Gtk.Box()
+        self.slot_trailing.add_named(trailing_vazio, "vazio")
+        self.slot_trailing.add_named(trailing_relogio_box, "relogio")
+        self.slot_trailing.add_named(self.eq_area, "eq")
+        self.slot_trailing.add_named(self.ativ_badge, "atividade")
+
         cabecalho = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         cabecalho.set_name("cabecalho")
-        cabecalho.append(self.dots)
-        cabecalho.append(self.ativ_box)
-        cabecalho.append(self.capa)
-        cabecalho.append(self.titulo)
-        cabecalho.append(self.eq_lbl)
-        cabecalho.append(self.ativ_badge)
-        cabecalho.append(self.mic_indicador)
-        cabecalho.append(self.rec_indicador)
-        cabecalho.append(self.relogio)
-        cabecalho.append(self.dnd_icone)
-        cabecalho.append(self.pin_icone)
-        cabecalho.append(self.hud_box)
-        cabecalho.append(self.notif_box)
+        cabecalho.append(self.slot_leading)
+        cabecalho.append(self.slot_center)
+        cabecalho.append(self.slot_trailing)
+        self.cabecalho = cabecalho
 
         # -- painel ---------------------------------------------------------
         # 1. Cartão Hero (mídia ativa ou contexto do desktop em repouso)
@@ -2084,8 +2398,8 @@ class Ilha:
 
         # -- Stack de Navegação Paginada ------------------------------------
         self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.stack.set_transition_duration(140)
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_UP_DOWN)
+        self.stack.set_transition_duration(260)
         self.stack.set_hhomogeneous(True)
         self.stack.set_vhomogeneous(False)
         self.stack.set_interpolate_size(False)
@@ -2310,6 +2624,7 @@ class Ilha:
                 self._h_colapsada = h
             else:
                 self._h_colapsada = ALTURA_CABECALHO
+            self._mola_h.x = self._mola_h.alvo = float(self._h_colapsada)
             log(f"altura colapsada medida: {self._h_colapsada}")
         return False
 
@@ -2320,6 +2635,10 @@ class Ilha:
         escolher() do Mpris roda num idle e pode ainda não ter chegado.
         """
         self._pronto = True
+        w = self._largura_alvo()
+        h = self._altura_alvo(self._expandido)
+        self._mola_w.x = self._mola_w.alvo = float(w)
+        self._mola_h.x = self._mola_h.alvo = float(h)
         self._aplicar_conteudo()
         return False
 
@@ -2336,75 +2655,47 @@ class Ilha:
         return LARGURA_EXPANDIDA_VAZIA if exp else LARGURA_VAZIA
 
     def _render_cabecalho(self) -> None:
-        """Renderizador único e determinístico do cabeçalho da ilha.
-
-        Centraliza a visibilidade de capa, título, equalizador, relógio, pin,
-        DND, dots, HUD de volume, notificação, atividades e privacidade.
-        """
+        """Renderizador único e determinístico do cabeçalho da ilha usando o modelo de 3 slots com crossfade."""
         if not hasattr(self, "relogio") or not self._pronto:
             return
+
+        # 1. Indicadores de privacidade e status do relógio
+        if hasattr(self, "pin_icone"):
+            self.pin_icone.set_visible(bool(self._fixado))
+        if hasattr(self, "dnd_icone"):
+            self.dnd_icone.set_visible(bool(self._dnd_ativo))
+        if hasattr(self, "mic_indicador"):
+            self.mic_indicador.set_visible(bool(getattr(self, "_mic_ativo", False)))
+        if hasattr(self, "rec_indicador"):
+            self.rec_indicador.set_visible(bool(getattr(self, "_rec_ativo", False)))
 
         # Estado 1: HUD de Volume ativo
         if getattr(self, "_hud_ativo", False):
             self.hud_box.set_visible(True)
-            self.notif_box.set_visible(False)
-            self.dots.set_visible(False)
-            if hasattr(self, "ativ_box"):
-                self.ativ_box.set_visible(False)
-            if hasattr(self, "ativ_badge"):
-                self.ativ_badge.set_visible(False)
-            if hasattr(self, "mic_indicador"):
-                self.mic_indicador.set_visible(False)
-            if hasattr(self, "rec_indicador"):
-                self.rec_indicador.set_visible(False)
-            self.capa.set_visible(False)
-            self.titulo.set_visible(False)
-            self.eq_lbl.set_visible(False)
-            self.relogio.set_visible(False)
-            self.pin_icone.set_visible(False)
-            self.dnd_icone.set_visible(False)
+            if hasattr(self, "slot_leading"):
+                self.slot_leading.set_visible_child_name("vazio")
+                self.slot_center.set_visible_child_name("hud")
+                self.slot_trailing.set_visible_child_name("vazio")
             if hasattr(self, "pilula_progresso"):
                 self.pilula_progresso.set_visible(False)
             return
 
         # Estado 2: HUD de Notificação ativo
         if getattr(self, "_notif_ativa", False):
-            self.hud_box.set_visible(False)
             self.notif_box.set_visible(True)
-            self.dots.set_visible(False)
-            if hasattr(self, "ativ_box"):
-                self.ativ_box.set_visible(False)
-            if hasattr(self, "ativ_badge"):
-                self.ativ_badge.set_visible(False)
-            if hasattr(self, "mic_indicador"):
-                self.mic_indicador.set_visible(False)
-            if hasattr(self, "rec_indicador"):
-                self.rec_indicador.set_visible(False)
-            self.capa.set_visible(False)
-            self.titulo.set_visible(False)
-            self.eq_lbl.set_visible(False)
-            self.relogio.set_visible(False)
-            self.pin_icone.set_visible(False)
-            self.dnd_icone.set_visible(False)
+            if hasattr(self, "slot_leading"):
+                self.slot_leading.set_visible_child_name("vazio")
+                self.slot_center.set_visible_child_name("notif")
+                self.slot_trailing.set_visible_child_name("vazio")
             if hasattr(self, "pilula_progresso"):
                 self.pilula_progresso.set_visible(False)
             return
 
-        # Estado 3: Normal / Repouso / Mídia / Atividades
-        self.hud_box.set_visible(False)
-        self.notif_box.set_visible(False)
-        self.relogio.set_visible(True)
-        self.pin_icone.set_visible(bool(self._fixado))
-        self.dnd_icone.set_visible(bool(self._dnd_ativo))
-
-        # Indicadores de privacidade
-        if hasattr(self, "mic_indicador"):
-            self.mic_indicador.set_visible(bool(getattr(self, "_mic_ativo", False)))
-        if hasattr(self, "rec_indicador"):
-            self.rec_indicador.set_visible(bool(getattr(self, "_rec_ativo", False)))
-
+        # Estado 3: Normal / Mídia / Atividades / Repouso
         tem = bool(self._tem_player)
         tem_ativ = bool(getattr(self, "_atividades", None))
+        tocando = (getattr(self, "_status", "Stopped") == "Playing")
+        pausado = (getattr(self, "_status", "Stopped") == "Paused")
 
         if tem_ativ:
             ativ = list(self._atividades.values())[-1]
@@ -2412,34 +2703,32 @@ class Ilha:
             texto = ativ.get("text", "")
             prog = ativ.get("progress")
 
+            if hasattr(self, "anel_progresso"):
+                self.anel_progresso.definir_progresso(prog)
+
             if tem:
-                # Mídia à esquerda, badge compacto da atividade à direita
-                self.dots.set_visible(False)
-                if hasattr(self, "ativ_box"):
-                    self.ativ_box.set_visible(False)
-                self.titulo.set_visible(True)
-                self.capa.set_visible(bool(getattr(self, "_capa_ok", False)))
-                tocando = (getattr(self, "_status", "Stopped") == "Playing")
-                pausado = (getattr(self, "_status", "Stopped") == "Paused")
-                self.eq_lbl.set_visible(tocando or pausado)
+                # Mídia à esquerda e centro, badge da atividade à direita
+                if getattr(self, "_capa_ok", False):
+                    self.capa.set_visible(True)
+                    self.slot_leading.set_visible_child_name("capa")
+                else:
+                    self.slot_leading.set_visible_child_name("dots")
+                self.slot_center.set_visible_child_name("titulo")
                 if hasattr(self, "ativ_badge"):
                     self.ativ_badge.set_text(f"{icone} {texto[:10]}")
                     self.ativ_badge.set_visible(True)
+                self.slot_trailing.set_visible_child_name("atividade")
                 prog_visivel = bool(not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False))
                 if hasattr(self, "pilula_progresso"):
                     self.pilula_progresso.set_visible(prog_visivel)
             else:
-                # Sem mídia: atividade assume o palco principal da pílula
-                self.dots.set_visible(False)
-                self.capa.set_visible(False)
-                self.titulo.set_visible(False)
-                self.eq_lbl.set_visible(False)
-                if hasattr(self, "ativ_badge"):
-                    self.ativ_badge.set_visible(False)
-                if hasattr(self, "ativ_box"):
-                    self.ativ_box.set_visible(True)
-                    self.ativ_icone.set_text(icone)
-                    self.ativ_texto.set_text(texto)
+                # Sem mídia: atividade toma o slot leading
+                self.ativ_box.set_visible(True)
+                self.ativ_icone.set_text(icone)
+                self.ativ_texto.set_text(texto)
+                self.slot_leading.set_visible_child_name("atividade")
+                self.slot_center.set_visible_child_name("vazio")
+                self.slot_trailing.set_visible_child_name("relogio")
                 if prog is not None and hasattr(self, "pilula_progresso"):
                     try:
                         self.pilula_progresso.set_fraction(max(0.0, min(1.0, float(prog))))
@@ -2449,19 +2738,31 @@ class Ilha:
                 elif hasattr(self, "pilula_progresso"):
                     self.pilula_progresso.set_visible(False)
         else:
-            if hasattr(self, "ativ_box"):
-                self.ativ_box.set_visible(False)
-            if hasattr(self, "ativ_badge"):
-                self.ativ_badge.set_visible(False)
-            self.dots.set_visible(not tem)
-            self.titulo.set_visible(tem)
-            self.capa.set_visible(tem and bool(getattr(self, "_capa_ok", False)))
-            tocando = (getattr(self, "_status", "Stopped") == "Playing")
-            pausado = (getattr(self, "_status", "Stopped") == "Paused")
-            self.eq_lbl.set_visible(tem and (tocando or pausado))
-            prog_visivel = bool(tem and not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False))
-            if hasattr(self, "pilula_progresso"):
-                self.pilula_progresso.set_visible(prog_visivel)
+            if hasattr(self, "anel_progresso"):
+                self.anel_progresso.definir_progresso(None)
+
+            if tem:
+                if getattr(self, "_capa_ok", False):
+                    self.capa.set_visible(True)
+                    self.slot_leading.set_visible_child_name("capa")
+                else:
+                    self.slot_leading.set_visible_child_name("dots")
+                self.slot_center.set_visible_child_name("titulo")
+                if tocando or pausado:
+                    self.slot_trailing.set_visible_child_name("eq")
+                else:
+                    self.slot_trailing.set_visible_child_name("relogio")
+
+                prog_visivel = bool(not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False))
+                if hasattr(self, "pilula_progresso"):
+                    self.pilula_progresso.set_visible(prog_visivel)
+            else:
+                # Repouso total
+                self.slot_leading.set_visible_child_name("dots")
+                self.slot_center.set_visible_child_name("vazio")
+                self.slot_trailing.set_visible_child_name("relogio")
+                if hasattr(self, "pilula_progresso"):
+                    self.pilula_progresso.set_visible(False)
 
     def _aplicar_cor_dinamica(self, cor: tuple[int, int, int] | None) -> None:
         """Aplica a cor dominante extraída da capa aos acentos da ilha."""
@@ -2469,7 +2770,14 @@ class Ilha:
             cor = (203, 166, 247)  # Catppuccin mauve padrão
         if getattr(self, "_cor_dinamica_atual", None) == cor:
             return
+
+        # Se houver animação ativa em andamento, posterga para não engasgar o frame rate
+        if getattr(self, "_tick_id", 0) != 0:
+            self._cor_dinamica_pendente = cor
+            return
+
         self._cor_dinamica_atual = cor
+        self._cor_dinamica_pendente = None
         r, g, b = cor
         hex_cor = f"#{r:02x}{g:02x}{b:02x}"
         css = f"""
@@ -2504,6 +2812,10 @@ class Ilha:
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2
             )
         self._prov_dinamico.load_from_data(css)
+        if hasattr(self, "eq_area"):
+            self.eq_area.definir_cor(r, g, b)
+        if hasattr(self, "anel_progresso"):
+            self.anel_progresso.definir_cor(r, g, b)
 
     def _aplicar_conteudo(self) -> None:
         """Reajusta visibilidade dos elementos da ilha de acordo com o estado do player."""
@@ -2605,8 +2917,10 @@ class Ilha:
                 self._mon_geom = (0, 0, 1920, 1080)
 
         mx, my, mw, _mh = self._mon_geom
-        w = self.win.get_width() or (LARGURA if self._tem_player else LARGURA_VAZIA)
-        h = self.win.get_height() or (self._h_colapsada or ALTURA_CABECALHO)
+        mola_w = getattr(self, "_mola_w", None)
+        mola_h = getattr(self, "_mola_h", None)
+        w = round(mola_w.x) if mola_w is not None else (self.win.get_width() or (LARGURA if self._tem_player else LARGURA_VAZIA))
+        h = round(mola_h.x) if mola_h is not None else (self.win.get_height() or (self._h_colapsada or ALTURA_CABECALHO))
         x = mx + (mw - w) // 2
         y = my + MARGEM_TOPO
         return x, y, w, h
@@ -2692,14 +3006,12 @@ class Ilha:
                 self.revelador.set_visible(True)
             self.revelador.set_reveal_child(sim)
         if sim:
-            # Os ticks de sistema e posição ficam parados enquanto a ilha está
-            # recolhida; atualizar agora com dados em cache evita travar o início da animação.
+            # Adia os ticks pesados para ~100ms após o início da animação,
+            # garantindo que o primeiro frame da expansão rode a 144Hz liso.
             if not getattr(self, "_notif_ativa", False):
-                self._tick_sistema()
-                self._tick_posicao()
-                self.rede.atualizar_async(self._mostrar_sistema)
+                GLib.timeout_add(100, self._aquecer_dados_expandir)
         # A surface layer-shell só CRESCE sozinha: quem manda no tamanho é o
-        # set_default_size, animado a cada frame de VSync com curva fluida.
+        # set_default_size, animado a cada frame de VSync com curva fluida de mola.
         self._animar_tamanho(self._largura_alvo(sim), self._altura_alvo(sim), ms=duracao)
         pos = cursor_pos()
         log(f"expandido={sim} cursor={pos} alvo={self._altura_alvo(sim)}")
@@ -2711,95 +3023,198 @@ class Ilha:
         # altura natural do painel + o spacing da pílula (4)
         return base + self.painel.get_preferred_size()[1].height + 4
 
-    def _animar_tamanho(self, largura: int, altura: int, ms: int | None = None) -> None:
-        """Anima largura, altura e opacidade sincronizado com o refresh rate do monitor (144Hz).
+    def _aquecer_dados_expandir(self) -> bool:
+        if self._expandido and not getattr(self, "_notif_ativa", False):
+            self._tick_sistema()
+            self._tick_posicao()
+            self.rede.atualizar_async(self._mostrar_sistema)
+        return GLib.SOURCE_REMOVE
 
-        Utiliza add_tick_callback para sincronizar quadro a quadro com o frame clock do compositor,
-        eliminando cortes secos e micro-stutters. Aplica curva assimétrica fluida com arranque
-        suave e desaceleração aveludada, acompanhada de crossfade de opacidade no conteúdo.
+    def _coreografar_progresso(self, progresso: float) -> None:
+        """Sincroniza opacidade e revelação de conteúdo a partir de um único progresso físico (0.0 a 1.0).
+
+        Coreografia Apple:
+        - Na expansão:
+          * Compacto (cabeçalho) desvanece nos primeiros 25% (0.00 -> 0.25).
+          * Cartão hero entra a partir de 22% até 85%.
+          * Linhas internas defasadas:
+            - info (hero_topo / hero_activity_banner): 30% -> 70%
+            - progresso (linha_progresso): 38% -> 78%
+            - controles (b_play, skip, shuffle): 46% -> 86%
+            - page_dots_box: 75% -> 95%
+        - No recolhimento: ordem inversa acelerada para saída limpa sem sobreposição.
         """
-        if getattr(self, "_tick_id", 0):
-            try:
-                self.win.remove_tick_callback(self._tick_id)
-            except Exception:
-                pass
-            self._tick_id = 0
+        p = max(0.0, min(1.0, progresso))
+        expandindo = bool(self._expandido)
+
+        # 1. Cabeçalho compacto (sai nos primeiros 25% na expansão, entra nos últimos 20% no recolhimento)
+        if hasattr(self, "cabecalho"):
+            if expandindo:
+                op_cab = max(0.0, min(1.0, 1.0 - (p / 0.25)))
+            else:
+                op_cab = max(0.0, min(1.0, 1.0 - (p / 0.20)))
+            self.cabecalho.set_opacity(op_cab)
+            self.cabecalho.set_can_target(op_cab > 0.5)
+
+        # 2. Visibilidade do revelador durante a transição
+        if hasattr(self, "revelador"):
+            if p > 0.02 and not self.revelador.get_visible():
+                self.revelador.set_visible(True)
+            elif p <= 0.01 and not expandindo and self.revelador.get_visible():
+                self.revelador.set_visible(False)
+
+        # 3. Cartão hero e camadas escalonadas
+        if hasattr(self, "hero_card"):
+            if expandindo:
+                op_hero = max(0.0, min(1.0, (p - 0.22) / 0.65))
+                op_topo = max(0.0, min(1.0, (p - 0.30) / 0.40))
+                op_prog = max(0.0, min(1.0, (p - 0.38) / 0.40))
+                op_ctrl = max(0.0, min(1.0, (p - 0.46) / 0.40))
+                op_dots = max(0.0, min(1.0, (p - 0.75) / 0.20))
+            else:
+                # Saída invertida mais rápida
+                op_hero = max(0.0, min(1.0, (p - 0.15) / 0.60))
+                op_dots = max(0.0, min(1.0, (p - 0.80) / 0.15))
+                op_ctrl = max(0.0, min(1.0, (p - 0.55) / 0.25))
+                op_prog = max(0.0, min(1.0, (p - 0.40) / 0.25))
+                op_topo = max(0.0, min(1.0, (p - 0.20) / 0.30))
+
+            self.hero_card.set_opacity(op_hero)
+
+            if hasattr(self, "hero_topo"):
+                self.hero_topo.set_opacity(op_topo)
+            if hasattr(self, "hero_activity_banner"):
+                self.hero_activity_banner.set_opacity(op_topo)
+            if hasattr(self, "linha_progresso"):
+                self.linha_progresso.set_opacity(op_prog)
+            if hasattr(self, "controles"):
+                self.controles.set_opacity(op_ctrl)
+            if hasattr(self, "page_dots_box"):
+                self.page_dots_box.set_opacity(op_dots)
+
+    def _animar_tamanho(self, largura: int, altura: int, ms: int | None = None,
+                        resposta: float | None = None, amortecimento: float | None = None) -> None:
+        """Anima largura e altura usando molas físicas interrompíveis sincronizadas ao frame clock (144Hz).
+
+        Preserva velocidade e posição atual, eliminando trancos em interrupções e reversões.
+        """
         if getattr(self, "_anim_src", 0):
             GLib.source_remove(self._anim_src)
             self._anim_src = 0
 
-        w0 = self.win.get_width() or largura
-        h0 = self.win.get_height() or altura
-
-        if ms is None:
-            ms = 320 if self._expandido else 280
-
-        # A surface é centralizada pelo compositor: se a largura muda, o x em cache
-        # é zerado para evitar que o hover considere o cursor fora prematuramente.
-        if largura != w0:
-            self._canto = None
-
-        t0 = time.monotonic()
-        expandindo = self._expandido
-
-        def passo(_widget, _clock) -> bool:
-            agora = time.monotonic()
-            t = min(1.0, (agora - t0) * 1000.0 / ms)
-
-            # Curva de mola fluida (Apple-like spring): arranque suave + desaceleração orgânica
-            if t <= 0.0:
-                e_w = 0.0
-                e_h = 0.0
-            elif t >= 1.0:
-                e_w = 1.0
-                e_h = 1.0
+        # Escolhe resposta e amortecimento de acordo com a transição
+        if resposta is None or amortecimento is None:
+            delta_h = altura - self._mola_h.x
+            if delta_h > 15:
+                # Expandir (0.42s resposta, 0.75 amortecimento -> 2.4% overshoot)
+                resp_padrao, amort_padrao = 0.42, 0.75
+            elif delta_h < -15:
+                # Recolher (0.32s resposta, 0.92 amortecimento -> crítico/sem overshoot)
+                resp_padrao, amort_padrao = 0.32, 0.92
+            elif ms is not None and ms <= 180:
+                # Pulso curto / HUD
+                resp_padrao, amort_padrao = 0.25, 0.80
             else:
-                base = 1.0 - math.pow(1.0 - math.pow(t, 1.3), 3.0)
-                e_h = base
-                if expandindo and largura > w0:
-                    # Leve overshoot tátil (~3.5%) na expansão da largura da pílula
-                    bounce = 0.038 * math.sin(t * math.pi) * math.pow(t, 1.2) * math.pow(1.0 - t, 0.8) * 3.8
-                    e_w = base + bounce
-                else:
-                    e_w = base
+                # Troca de página / atividade
+                resp_padrao, amort_padrao = 0.30, 0.85
 
-            w = round(w0 + (largura - w0) * e_w)
-            h = round(h0 + (altura - h0) * e_h)
+            resposta = resposta if resposta is not None else resp_padrao
+            amortecimento = amortecimento if amortecimento is not None else amort_padrao
 
+        self._mola_w.reconfigurar(resposta, amortecimento)
+        self._mola_h.reconfigurar(resposta, amortecimento)
+
+        # Se já está no alvo com velocidade praticamente nula, nada a fazer
+        if round(self._mola_w.alvo) == largura and round(self._mola_h.alvo) == altura:
+            if (abs(self._mola_w.x - largura) < 0.25 and abs(self._mola_h.x - altura) < 0.25 and
+                    abs(self._mola_w.v) < 1.5 and abs(self._mola_h.v) < 1.5):
+                return
+
+        self._mola_w.ir_para(largura)
+        self._mola_h.ir_para(altura)
+        self._canto = None
+
+        if not getattr(self, "_tick_id", 0):
+            self._ult_frame_time = None
+            try:
+                self._tick_id = self.win.add_tick_callback(self._passo_mola)
+            except Exception:
+                self._tick_id = 0
+                self._anim_src = GLib.timeout_add(8, lambda: self._passo_mola(self.win, None))
+
+    def _passo_mola(self, _widget, clock) -> bool:
+        if clock is not None:
+            t = clock.get_frame_time() / 1e6
+        else:
+            t = time.monotonic()
+
+        if self._ult_frame_time is None:
+            dt = 0.0
+        else:
+            dt = t - self._ult_frame_time
+        self._ult_frame_time = t
+
+        # Medição de quadros lentos durante a animação (Item 7)
+        if dt > 0 and getattr(self, "_taxa_hz", 0) > 0:
+            limite = 1.5 / self._taxa_hz
+            if dt > limite:
+                log(f"[PERF] frame lento: {dt * 1000.0:.1f} ms (esperado <= {limite * 1000.0:.1f} ms @ {self._taxa_hz:.0f}Hz)")
+
+        ok_w = self._mola_w.passo(dt)
+        ok_h = self._mola_h.passo(dt)
+        ok = ok_w and ok_h
+
+        w = round(self._mola_w.x)
+        h = round(self._mola_h.x)
+
+        if w != getattr(self, "_ultimo_w", None) or h != getattr(self, "_ultimo_h", None):
             self.pilula.set_size_request(w, h)
             self.win.set_default_size(w, h)
+            self._ultimo_w = w
+            self._ultimo_h = h
 
-            # Transição de opacidade coordenada (fade suave nos conteúdos internos)
-            if hasattr(self, "hero_card"):
-                if expandindo:
-                    op = max(0.0, min(1.0, (e_h - 0.06) / 0.82))
-                else:
-                    op = max(0.0, min(1.0, (1.0 - e_h) / 0.60))
-                self.hero_card.set_opacity(op)
+        h_col = self._h_colapsada if self._h_colapsada is not None else ALTURA_CABECALHO
+        h_exp = getattr(self, "_h_expandida_alvo", None) or self._altura_alvo(True)
+        progresso = max(0.0, min(1.0, (self._mola_h.x - h_col) / max(1.0, h_exp - h_col)))
+        self._coreografar_progresso(progresso)
 
-            if t >= 1.0:
-                self.pilula.set_size_request(largura, altura)
-                self.win.set_default_size(largura, altura)
-                if not self._expandido:
-                    self.revelador.set_visible(False)
-                    if hasattr(self, "hero_card"):
-                        self.hero_card.set_opacity(0.0)
-                else:
-                    if hasattr(self, "hero_card"):
-                        self.hero_card.set_opacity(1.0)
+        if ok:
+            w_final = round(self._mola_w.alvo)
+            h_final = round(self._mola_h.alvo)
+            self.pilula.set_size_request(w_final, h_final)
+            self.win.set_default_size(w_final, h_final)
+            self._ultimo_w = w_final
+            self._ultimo_h = h_final
 
-                if largura != w0:
-                    self._canto = None
-                self._tick_id = 0
-                return GLib.SOURCE_REMOVE
+            if not self._expandido:
+                self.revelador.set_visible(False)
+                if hasattr(self, "cabecalho"):
+                    self.cabecalho.set_opacity(1.0)
+                    self.cabecalho.set_can_target(True)
+                if hasattr(self, "hero_card"):
+                    self.hero_card.set_opacity(0.0)
+            else:
+                self.revelador.set_visible(True)
+                if hasattr(self, "cabecalho"):
+                    self.cabecalho.set_opacity(0.0)
+                    self.cabecalho.set_can_target(False)
+                if hasattr(self, "hero_card"):
+                    self.hero_card.set_opacity(1.0)
+                for w_nome in ("hero_topo", "hero_activity_banner", "linha_progresso", "controles", "page_dots_box"):
+                    w_obj = getattr(self, w_nome, None)
+                    if w_obj is not None:
+                        w_obj.set_opacity(1.0)
 
-            return GLib.SOURCE_CONTINUE
+            if getattr(self, "_cor_dinamica_pendente", None) is not None:
+                pendente = self._cor_dinamica_pendente
+                self._cor_dinamica_pendente = None
+                self._aplicar_cor_dinamica(pendente)
 
-        try:
-            self._tick_id = self.win.add_tick_callback(passo)
-        except Exception:
             self._tick_id = 0
-            self._anim_src = GLib.timeout_add(8, lambda: passo(self.win, None))
+            self._ult_frame_time = None
+            return GLib.SOURCE_REMOVE
+
+        return GLib.SOURCE_CONTINUE
 
     # -- atualização --------------------------------------------------------
     def atualizar(self) -> None:
@@ -3011,35 +3426,44 @@ class Ilha:
         self._render_cabecalho()
 
     def _sincronizar_eq(self) -> None:
-        deve = (self._tem_player and getattr(self, "_status", "") == "Playing"
-                and not getattr(self, "_mudo", False)
-                and not getattr(self, "_hud_ativo", False)
-                and not getattr(self, "_notif_ativa", False)
-                and not getattr(self, "_fullscreen", False))
-        if deve and not self._eq_timer:
+        status = getattr(self, "_status", "")
+        tocando = (self._tem_player and status == "Playing"
+                   and not getattr(self, "_mudo", False)
+                   and not getattr(self, "_hud_ativo", False)
+                   and not getattr(self, "_notif_ativa", False)
+                   and not getattr(self, "_fullscreen", False))
+        pausado = (self._tem_player and status == "Paused" and not getattr(self, "_mudo", False))
+        mudo = bool(getattr(self, "_mudo", False))
+
+        if hasattr(self, "eq_area"):
+            self.eq_area.definir_estado(ativo=tocando, pausado=pausado, mudo=mudo)
+
+        if tocando and not self._eq_timer:
             self._eq_timer = GLib.timeout_add(140, self._tick_eq)
-        elif not deve and self._eq_timer:
+        elif not tocando and self._eq_timer:
             GLib.source_remove(self._eq_timer)
             self._eq_timer = 0
-            if getattr(self, "_status", None) == "Paused":
+            if pausado:
                 self.eq_lbl.set_text(" ▂ ")
-            elif getattr(self, "_mudo", False):
+            elif mudo:
                 self.eq_lbl.set_text("───")
 
     def _pulsar_troca_faixa(self) -> None:
         if self._expandido or getattr(self, "_hud_ativo", False) or getattr(self, "_notif_ativa", False):
             return
         largura_normal = self._largura_alvo(False)
-        largura_pulso = min(LARGURA, largura_normal + 36)
-        self._animar_tamanho(largura_pulso, self._altura_alvo(False), ms=180)
+        largura_pulso = min(LARGURA, largura_normal + 12)
+        # Pop curto estilo Dynamic Island: resposta rápida e ligeiro bounce
+        self._animar_tamanho(largura_pulso, self._altura_alvo(False), resposta=0.22, amortecimento=0.72)
         if getattr(self, "_faixa_pulso_timer", 0):
             GLib.source_remove(self._faixa_pulso_timer)
-        self._faixa_pulso_timer = GLib.timeout_add(2200, self._terminar_pulso_faixa)
+        self._faixa_pulso_timer = GLib.timeout_add(300, self._terminar_pulso_faixa)
 
     def _terminar_pulso_faixa(self) -> bool:
         self._faixa_pulso_timer = 0
         if not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False):
-            self._animar_tamanho(self._largura_alvo(False), self._altura_alvo(False), ms=240)
+            # Retorna suavemente com a mola assentando no tamanho normal
+            self._animar_tamanho(self._largura_alvo(False), self._altura_alvo(False), resposta=0.32, amortecimento=0.90)
         return False
 
     def _ao_clicar_focar_player(self) -> None:
@@ -3096,8 +3520,18 @@ class Ilha:
             self.hud_icone.set_text("󰕾")
 
         self.hud_pct.set_text(f"{pct}%")
-        self.hud_barra.set_fraction(min(1.0, max(0.0, vol)))
-        self._animar_tamanho(260, self._altura_alvo(False), ms=150)
+
+        alvo_frac = min(1.0, max(0.0, vol))
+        self._mola_vol.ir_para(alvo_frac)
+        if not getattr(self, "_tick_vol_id", 0):
+            self._ult_t_vol = None
+            try:
+                self._tick_vol_id = self.win.add_tick_callback(self._passo_mola_vol)
+            except Exception:
+                self._tick_vol_id = 0
+                self.hud_barra.set_fraction(alvo_frac)
+
+        self._animar_tamanho(260, self._altura_alvo(False), resposta=0.25, amortecimento=0.82)
 
         if self._hud_timer:
             GLib.source_remove(self._hud_timer)
@@ -3134,25 +3568,61 @@ class Ilha:
         self.stack.set_visible_child_name(nome)
         self._atualizar_indicador_pagina(nome)
         if self._expandido and not getattr(self, "_notif_ativa", False):
-            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True), ms=160)
+            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True),
+                                 resposta=0.30, amortecimento=0.85)
 
     def _ao_mudar_kde(self) -> None:
         if hasattr(self, "btn_phone") and self._expandido:
             self._mostrar_sistema()
 
     def _ao_clicar_limpar_historico(self, *_) -> None:
-        limpar_historico_notificacoes()
-        self._carregar_historico_notificacoes()
+        self._historico_cache = []
+        self._renderizar_itens_historico([])
         if self._expandido:
-            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True), ms=160)
+            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True),
+                                 resposta=0.30, amortecimento=0.85)
+
+        def _worker():
+            limpar_historico_notificacoes()
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _carregar_historico_notificacoes(self) -> None:
+        if not hasattr(self, "box_lista_historico"):
+            return
+
+        # 1. Renderiza o cache instantaneamente (zero bloqueio da UI)
+        if hasattr(self, "_historico_cache"):
+            self._renderizar_itens_historico(self._historico_cache)
+
+        # 2. Busca o histórico atualizado em thread de fundo
+        if getattr(self, "_carregando_historico", False):
+            return
+        self._carregando_historico = True
+
+        def _worker():
+            itens = ler_historico_notificacoes(limite=4)
+
+            def _aplicar():
+                self._carregando_historico = False
+                self._historico_cache = itens
+                # Só re-renderiza se a página visível ainda for histórico
+                if hasattr(self, "stack") and self.stack.get_visible_child_name() == "historico":
+                    self._renderizar_itens_historico(itens)
+                    if self._expandido and not getattr(self, "_notif_ativa", False):
+                        self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True),
+                                             resposta=0.30, amortecimento=0.85)
+
+            GLib.idle_add(_aplicar)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _renderizar_itens_historico(self, itens: list[dict]) -> None:
         if not hasattr(self, "box_lista_historico"):
             return
         while child := self.box_lista_historico.get_first_child():
             self.box_lista_historico.remove(child)
 
-        itens = ler_historico_notificacoes(limite=4)
         if not itens:
             vazio_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             vazio_box.set_halign(Gtk.Align.CENTER)
@@ -3667,6 +4137,23 @@ class Ilha:
         self.eq_lbl.set_text(EQ_FRAMES[self._eq_idx])
         return True
 
+    def _passo_mola_vol(self, _widget, clock) -> bool:
+        """Atualiza a barra de volume com mola física fluida a 144Hz."""
+        t = (clock.get_frame_time() / 1e6) if clock is not None else time.monotonic()
+        dt = 0.0 if getattr(self, "_ult_t_vol", None) is None else t - self._ult_t_vol
+        self._ult_t_vol = t
+        assentou = self._mola_vol.passo(min(dt, 1.0 / 30.0))
+        frac = max(0.0, min(1.0, self._mola_vol.x))
+        if hasattr(self, "hud_barra"):
+            self.hud_barra.set_fraction(frac)
+        if hasattr(self, "sys_barra_vol"):
+            self.sys_barra_vol.set_fraction(frac)
+        if assentou:
+            self._tick_vol_id = 0
+            self._ult_t_vol = None
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
     def _mostrar_hud_volume(self) -> None:
         if not self._pronto or self._expandido:
             return
@@ -3697,8 +4184,17 @@ class Ilha:
                 self.hud_icone.set_text("󰕿")
             self.hud_pct.set_text(f"{vol}%")
 
-        self.hud_barra.set_fraction(min(1.0, max(0.0, vol / 100.0)))
-        self._animar_tamanho(260, self._altura_alvo(False), ms=150)
+        alvo_frac = 0.0 if mudo else min(1.0, max(0.0, vol / 100.0))
+        self._mola_vol.ir_para(alvo_frac)
+        if not getattr(self, "_tick_vol_id", 0):
+            self._ult_t_vol = None
+            try:
+                self._tick_vol_id = self.win.add_tick_callback(self._passo_mola_vol)
+            except Exception:
+                self._tick_vol_id = 0
+                self.hud_barra.set_fraction(alvo_frac)
+
+        self._animar_tamanho(260, self._altura_alvo(False), resposta=0.25, amortecimento=0.82)
 
         if self._hud_timer:
             GLib.source_remove(self._hud_timer)
