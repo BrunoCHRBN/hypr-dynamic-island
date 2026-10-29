@@ -50,15 +50,23 @@ Projetada com foco em **física de mola a 144 Hz**, **zero travamentos na thread
 hypr-dynamic-island/
 ├── bin/
 │   ├── island            # Launcher principal com carregamento seguro do Layer-Shell
+│   ├── islandctl         # CLI unificada (JSON-RPC) para controle completo da ilha
 │   ├── island-activity   # Utilitário CLI para Pomodoro e Live Activities
 │   ├── island-dnd        # Alternador do modo Não Perturbe (DND)
 │   ├── island-notify     # Ponte de notificações (CLI / Dunst)
 │   └── island-toggle     # Alternador de abertura da ilha via IPC UNIX Socket
 ├── config/
-│   └── config.example.toml # Arquivo de configuração de exemplo
+│   └── config.example.toml # Arquivo de configuração de exemplo (com [[toggles]])
 ├── src/
-│   ├── island.py         # Daemon e interface gráfica GTK4 da Dynamic Island
-│   └── island.css        # Estilos, transições e tema visual
+│   ├── island/           # Pacote modular 2.0
+│   │   ├── app.py        # Aplicação principal (GTK4 Layer Shell + loop)
+│   │   ├── core/         # Atividades canônicas, pure scene resolution, mola física, IPC
+│   │   ├── fontes/       # Fontes reativas refcounted (MPRIS, Volume, Hypr, Rede, etc.)
+│   │   ├── paginas/      # Telas modulares (Mídia, Hub, Controles, Histórico)
+│   │   └── ui/           # Cabeçalho 3 slots, equalizador vetorial Cairo 144Hz
+│   ├── island.py         # Daemon unificado / script legado com melhorias
+│   └── island.css        # Estilos, transições fluidas e tema Catppuccin
+├── tests/                # Testes unitários automatizados (25 testes cobrindo todo o sistema)
 ├── systemd/
 │   └── island.service    # Unidade systemd de usuário para inicialização automática
 ├── install.sh            # Script de instalação automatizado
@@ -167,28 +175,46 @@ script = /home/SEU_USUARIO/.local/bin/island-notify
 
 ## 🛠️ Comandos CLI
 
-A Dynamic Island expõe um socket UNIX ultrarrápido em `$XDG_RUNTIME_DIR/island.sock`:
+A Dynamic Island expõe um socket UNIX bidirecional em `$XDG_RUNTIME_DIR/island.sock` compatível com JSON-RPC:
 
-- **Alternar expansão:**
+### `islandctl` (CLI Unificada)
+- **Consultar estado completo:**
   ```bash
-  island-toggle
+  islandctl state           # Resumo formatado
+  islandctl state --json    # JSON bruto com player, volume, página, status
   ```
-- **Iniciar timer Pomodoro:**
+- **Alternar expansão ou fixar:**
   ```bash
-  island-activity timer 25m "Estudo Focado"
+  islandctl toggle
+  islandctl expand
+  islandctl collapse
+  islandctl pin toggle      # Fixa aberta sem auto-dismiss
   ```
-- **Parar timer ativo:**
+- **Navegar diretamente entre páginas:**
   ```bash
-  island-activity stop-timer
+  islandctl page midia
+  islandctl page hub
+  islandctl page controles
+  islandctl page historico
   ```
-- **Exibir notificação personalizada na ilha:**
+- **Controle de mídia:**
   ```bash
-  island-notify "Título" "Mensagem customizada"
+  islandctl media play-pause
+  islandctl media next
+  islandctl media prev
   ```
-- **Alternar modo Não Perturbe:**
+- **Atividades ao Vivo & Pomodoro:**
   ```bash
-  island-dnd
+  islandctl activity timer -m 25 -t "Foco ITA"
+  islandctl activity add --id build --text "Compilando Kernel" --progress 0.65
+  islandctl activity remove --id build
   ```
+
+### Utilitários Rápidos de Integração
+- **Alternar expansão:** `island-toggle`
+- **Alternar Não Perturbe:** `island-dnd`
+- **Ponte de Notificação:** `island-notify "Título" "Mensagem"`
+- **Pomodoro CLI:** `island-activity timer 25m "Estudo"`
 
 ---
 

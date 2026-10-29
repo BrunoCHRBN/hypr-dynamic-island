@@ -1,6 +1,7 @@
 """Gerenciador do cabeçalho da ilha baseado no modelo de 3 slots (Leading, Center, Trailing)."""
 
 from __future__ import annotations
+import os
 from typing import Optional, Any
 import gi
 gi.require_version("Gtk", "4.0")
@@ -118,8 +119,11 @@ class CabecalhoSlots(Gtk.Box):
         elif item.tipo == "capa":
             img = Gtk.Image()
             img.set_name("capa")
+            img.set_pixel_size(24)
             if isinstance(item.valor, Gdk.Texture):
                 img.set_from_paintable(item.valor)
+            elif isinstance(item.valor, str) and os.path.exists(item.valor):
+                img.set_from_file(item.valor)
             else:
                 img.set_from_icon_name("audio-x-generic-symbolic")
             container.append(img)

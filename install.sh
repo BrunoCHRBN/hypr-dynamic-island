@@ -60,19 +60,22 @@ DEST_SYSTEMD="$HOME/.config/systemd/user"
 mkdir -p "$DEST_SCRIPTS" "$DEST_BIN" "$DEST_CONFIG" "$DEST_SYSTEMD"
 
 # 3. Installing Core Files
-log_info "Instalando scripts e estilos em $DEST_SCRIPTS..."
-cp -f "$REPO_DIR/src/island.py" "$DEST_SCRIPTS/island.py"
+log_info "Instalando pacote modular e estilos em $DEST_SCRIPTS..."
+rm -rf "$DEST_SCRIPTS/island"
+cp -rf "$REPO_DIR/src/island" "$DEST_SCRIPTS/island"
 cp -f "$REPO_DIR/src/island.css" "$DEST_SCRIPTS/island.css"
-chmod +x "$DEST_SCRIPTS/island.py"
-log_ok "island.py e island.css instalados."
+if [ -f "$REPO_DIR/src/island.py" ]; then
+    cp -f "$REPO_DIR/src/island.py" "$DEST_SCRIPTS/island.py.monolithic"
+fi
+log_ok "Pacote modular 'island' e island.css instalados em $DEST_SCRIPTS."
 
 # 4. Installing CLI Wrappers
 log_info "Instalando executáveis em $DEST_BIN..."
-for b in island island-toggle island-notify island-activity island-dnd; do
+for b in island islandctl island-toggle island-notify island-activity island-dnd; do
     cp -f "$REPO_DIR/bin/$b" "$DEST_BIN/$b"
     chmod +x "$DEST_BIN/$b"
 done
-log_ok "Utilitários CLI instalados em $DEST_BIN."
+log_ok "Utilitários CLI (incluindo islandctl) instalados em $DEST_BIN."
 
 # 5. Installing Config
 if [ ! -f "$DEST_CONFIG/config.toml" ]; then

@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""islandctl — Ferramenta de linha de comando para controle e consulta da Dynamic Island."""
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+SOCKET_PATH = f"/run/user/{os.getuid()}/island.sock"
+
+
+def enviar_comando(payload: dict) -> dict:
+    if not os.path.exists(SOCKET_PATH):
+        print(f"Erro: Socket da Dynamic Island não encontrado ({SOCKET_PATH}). O serviço está rodando?", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(2.5)
+            s.connect(SOCKET_PATH)
+            mensagem = json.dumps(payload) + "\n"
+            s.sendall(mensagem.encode("utf-8"))
+            resposta = s.recv(8192).decode("utf-8").strip()
+            if not resposta:
+                return {"status": "ok"}
+            return json.loads(resposta)
+    except Exception as e:
+        print(f"Erro ao comunicar com a Dynamic Island: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_state(args):
+    resp = enviar_comando({"acao": "state"})
+    if args.json:
+        print(json.dumps(resp.get("dados", resp), indent=2, ensure_ascii=False))
+    else:
+        dados = resp.get("dados", {})
+        print(f"Estado: {'Expandido' if dados.get('expandido') else 'Recolhido'} | Fixado: {'Sim' if dados.get('fixado') else 'Não'}")
+        print(f"Página Ativa: {dados.get('pagina', 'nenhuma')}")
+        m = dados.get("mpris", {})
+        if m.get("titulo"):
+            print(f"Mídia: {m.get('titulo')} - {m.get('artista')} ({m.get('status')})")
+        print(f"Volume: {dados.get('volume')}%")
+
+
+def cmd_toggle(_args):
+    resp = enviar_comando({"acao": "toggle"})
+    if resp.get("status") == "ok":
+        print(f"Dynamic Island: {'Expandida' if resp.get('expandido') else 'Recolhida'}")
+
+
+def cmd_expand(_args):
+    enviar_comando({"acao": "expand"})
+
+
+def cmd_collapse(_args):
+    enviar_comando({"acao": "collapse"})
+
+
+def cmd_pin(args):
+    estado = args.modo or "toggle"
+    resp = enviar_comando({"acao": "pin", "modo": estado})
+    print(f"Modo Fixado: {'Ativado' if resp.get('fixado') else 'Desativado'}")
+
+
+def cmd_page(args):
+    resp = enviar_comando({"acao": "page", "nome": args.nome})
+    if resp.get("status") == "ok":
+        print(f"Página alterada para: {args.nome}")
+    else:
+        print(f"Erro: {resp.get('mensagem')}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_media(args):
+    resp = enviar_comando({"acao": "media", "comando": args.comando})
+    if resp.get("status") != "ok":
+        print(f"Erro: {resp.get('mensagem')}", file=sys.stderr)
+
+
+def cmd_notify(args):
+    payload = {
+        "acao": "notify",
+        "app": args.app or "Sistema",
+        "titulo": args.title,
+        "corpo": args.body or "",
+        "urgencia": args.urgency or "normal",
+        "duracao_ms": args.duration or 3500,
+    }
+    enviar_comando(payload)
+
+
+def cmd_activity(args):
+    if args.sub == "add":
+        payload = {
+            "acao": "activity",
+            "operacao": "adicionar",
+            "id": args.id,
+            "texto": args.text,
+            "subtexto": args.subtext or "",
+            "icone": args.icon or "󰔟",
+            "progresso": float(args.progress) if args.progress is not None else None,
+            "ttl": int(args.ttl or 0),
+        }
+        enviar_comando(payload)
+    elif args.sub == "remove":
+        enviar_comando({"acao": "activity", "operacao": "remover", "id": args.id})
+    elif args.sub == "timer":
+        minutos = float(args.minutes)
+        ttl = int(minutos * 60)
+        payload = {
+            "acao": "activity",
+            "operacao": "adicionar",
+            "id": "timer",
+            "texto": args.text or f"Timer: {int(minutos)}m",
+            "subtexto": f"Finaliza em {int(minutos)} min",
+            "icone": "󰔟",
+            "progresso": 1.0,
+            "ttl": ttl,
+        }
+        enviar_comando(payload)
+        print(f"Timer de {minutos} minuto(s) iniciado na Dynamic Island.")
+
+
+def cmd_dnd(args):
+    resp = enviar_comando({"acao": "dnd", "modo": args.modo or "toggle"})
+    print(f"Modo Não Perturbe (DND): {'Ativado' if resp.get('dnd') else 'Desativado'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="islandctl — Controle CLI da Dynamic Island")
+    subparsers = parser.add_subparsers(dest="comando", required=True)
+
+    # state
+    p_state = subparsers.add_parser("state", help="Consulta o estado atual da ilha")
+    p_state.add_argument("--json", action="store_true", help="Saída em formato JSON bruto")
+    p_state.set_defaults(func=cmd_state)
+
+    # toggle
+    p_toggle = subparsers.add_parser("toggle", help="Alterna entre recolhida e expandida")
+    p_toggle.set_defaults(func=cmd_toggle)
+
+    # expand / collapse
+    p_exp = subparsers.add_parser("expand", help="Expande a ilha")
+    p_exp.set_defaults(func=cmd_expand)
+    p_col = subparsers.add_parser("collapse", help="Recolhe a ilha")
+    p_col.set_defaults(func=cmd_collapse)
+
+    # pin
+    p_pin = subparsers.add_parser("pin", help="Fixa ou desafixa a ilha aberta")
+    p_pin.add_argument("modo", nargs="?", choices=["toggle", "on", "off"], default="toggle")
+    p_pin.set_defaults(func=cmd_pin)
+
+    # page
+    p_page = subparsers.add_parser("page", help="Muda a página ativa no painel expandido")
+    p_page.add_argument("nome", choices=["midia", "hub", "produtividade", "controles", "sistema", "historico"])
+    p_page.set_defaults(func=cmd_page)
+
+    # media
+    p_media = subparsers.add_parser("media", help="Comandos de controle de mídia")
+    p_media.add_argument("comando", choices=["play-pause", "play", "pause", "next", "prev", "shuffle", "repeat"])
+    p_media.set_defaults(func=cmd_media)
+
+    # notify
+    p_notif = subparsers.add_parser("notify", help="Dispara um HUD de notificação")
+    p_notif.add_argument("--title", "-t", required=True, help="Título da notificação")
+    p_notif.add_argument("--body", "-b", help="Corpo da notificação")
+    p_notif.add_argument("--app", "-a", help="Nome do aplicativo de origem")
+    p_notif.add_argument("--duration", "-d", type=int, help="Duração em milissegundos")
+    p_notif.add_argument("--urgency", "-u", choices=["low", "normal", "critical"], help="Urgência")
+    p_notif.set_defaults(func=cmd_notify)
+
+    # activity
+    p_ativ = subparsers.add_parser("activity", help="Gerencia Atividades ao Vivo")
+    sub_ativ = p_ativ.add_subparsers(dest="sub", required=True)
+
+    p_add = sub_ativ.add_parser("add", help="Adiciona uma atividade")
+    p_add.add_argument("--id", required=True, help="ID único da atividade")
+    p_add.add_argument("--text", required=True, help="Texto principal")
+    p_add.add_argument("--subtext", help="Subtexto")
+    p_add.add_argument("--icon", help="Ícone nerd font ou glifo")
+    p_add.add_argument("--progress", type=float, help="Fração de progresso de 0.0 a 1.0")
+    p_add.add_argument("--ttl", type=int, help="Tempo de vida em segundos (0 = infinito)")
+
+    p_rem = sub_ativ.add_parser("remove", help="Remove uma atividade")
+    p_rem.add_argument("--id", required=True, help="ID da atividade a remover")
+
+    p_timer = sub_ativ.add_parser("timer", help="Inicia uma atividade de timer/pomodoro")
+    p_timer.add_argument("--minutes", "-m", type=float, required=True, help="Duração em minutos")
+    p_timer.add_argument("--text", help="Título do timer")
+
+    p_ativ.set_defaults(func=cmd_activity)
+
+    # dnd
+    p_dnd = subparsers.add_parser("dnd", help="Controla o modo Não Perturbe")
+    p_dnd.add_argument("modo", nargs="?", choices=["toggle", "on", "off"], default="toggle")
+    p_dnd.set_defaults(func=cmd_dnd)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

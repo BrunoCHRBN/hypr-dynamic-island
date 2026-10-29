@@ -3,14 +3,14 @@ window { background: transparent; }
 #ilha {
   background-color: #0c0d14;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 19px;
+  border-radius: 17px;
   padding: 5px 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  transition: border-color 240ms ease, box-shadow 240ms ease, border-radius 240ms ease;
+  transition: border-color 300ms ease, box-shadow 300ms ease, border-radius 350ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 #ilha.expandido {
-  border-radius: 22px;
+  border-radius: 28px;
 }
 
 #ilha.fixado {

@@ -27,10 +27,11 @@ def enviar_ipc(payload: dict) -> bool:
     if not os.path.exists(sock_path):
         return False
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        s.sendto(json.dumps(payload).encode("utf-8"), sock_path)
-        s.close()
-        return True
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(sock_path)
+            s.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+            return True
     except Exception as e:
         print(f"Erro ao enviar para {sock_path}: {e}", file=sys.stderr)
         return False

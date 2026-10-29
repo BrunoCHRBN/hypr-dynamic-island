@@ -15,6 +15,7 @@ from .atividade import (
 from .cena import Cena, resolver_cena
 from .config import carregar_config, CONFIG_PADRAO
 from .mola import Mola
+from .ipc import ServidorIPC, SOCKET_PATH
 
 __all__ = [
     "Atividade",
@@ -25,6 +26,8 @@ __all__ = [
     "carregar_config",
     "CONFIG_PADRAO",
     "Mola",
+    "ServidorIPC",
+    "SOCKET_PATH",
     "PRIORIDADE_HUD",
     "PRIORIDADE_NOTIFICACAO",
     "PRIORIDADE_PRIVACIDADE",
