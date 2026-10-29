@@ -1773,7 +1773,7 @@ class Ilha:
         self.notif_texto = Gtk.Label(label="")
         self.notif_texto.set_name("notif-texto")
         self.notif_texto.set_ellipsize(Pango.EllipsizeMode.END)
-        self.notif_texto.set_max_width_chars(32)
+        self.notif_texto.set_max_width_chars(42)
         self.notif_texto.set_hexpand(True)
         self.notif_texto.set_xalign(0)
 
@@ -2645,7 +2645,7 @@ class Ilha:
     def _largura_alvo(self, expandido: bool | None = None) -> int:
         exp = self._expandido if expandido is None else expandido
         if getattr(self, "_notif_ativa", False):
-            return 380 if exp else 360
+            return 380 if exp else getattr(self, "_notif_largura_alvo", 360)
         if getattr(self, "_hud_ativo", False):
             return 260
         if self._tem_player:
@@ -3047,14 +3047,10 @@ class Ilha:
         p = max(0.0, min(1.0, progresso))
         expandindo = bool(self._expandido)
 
-        # 1. Cabeçalho compacto (sai nos primeiros 25% na expansão, entra nos últimos 20% no recolhimento)
+        # 1. Cabeçalho compacto (permanece visível no topo para clique de recolher e status contínuo)
         if hasattr(self, "cabecalho"):
-            if expandindo:
-                op_cab = max(0.0, min(1.0, 1.0 - (p / 0.25)))
-            else:
-                op_cab = max(0.0, min(1.0, 1.0 - (p / 0.20)))
-            self.cabecalho.set_opacity(op_cab)
-            self.cabecalho.set_can_target(op_cab > 0.5)
+            self.cabecalho.set_opacity(1.0)
+            self.cabecalho.set_can_target(True)
 
         # 2. Visibilidade do revelador durante a transição
         if hasattr(self, "revelador"):
@@ -3066,18 +3062,18 @@ class Ilha:
         # 3. Cartão hero e camadas escalonadas
         if hasattr(self, "hero_card"):
             if expandindo:
-                op_hero = max(0.0, min(1.0, (p - 0.22) / 0.65))
-                op_topo = max(0.0, min(1.0, (p - 0.30) / 0.40))
-                op_prog = max(0.0, min(1.0, (p - 0.38) / 0.40))
-                op_ctrl = max(0.0, min(1.0, (p - 0.46) / 0.40))
-                op_dots = max(0.0, min(1.0, (p - 0.75) / 0.20))
+                op_hero = max(0.0, min(1.0, (p - 0.08) / 0.75))
+                op_topo = max(0.0, min(1.0, (p - 0.16) / 0.50))
+                op_prog = max(0.0, min(1.0, (p - 0.24) / 0.50))
+                op_ctrl = max(0.0, min(1.0, (p - 0.32) / 0.50))
+                op_dots = max(0.0, min(1.0, (p - 0.50) / 0.35))
             else:
                 # Saída invertida mais rápida
-                op_hero = max(0.0, min(1.0, (p - 0.15) / 0.60))
-                op_dots = max(0.0, min(1.0, (p - 0.80) / 0.15))
-                op_ctrl = max(0.0, min(1.0, (p - 0.55) / 0.25))
-                op_prog = max(0.0, min(1.0, (p - 0.40) / 0.25))
-                op_topo = max(0.0, min(1.0, (p - 0.20) / 0.30))
+                op_hero = max(0.0, min(1.0, (p - 0.08) / 0.70))
+                op_dots = max(0.0, min(1.0, (p - 0.55) / 0.25))
+                op_ctrl = max(0.0, min(1.0, (p - 0.38) / 0.30))
+                op_prog = max(0.0, min(1.0, (p - 0.22) / 0.30))
+                op_topo = max(0.0, min(1.0, (p - 0.10) / 0.35))
 
             self.hero_card.set_opacity(op_hero)
 
@@ -3196,8 +3192,8 @@ class Ilha:
             else:
                 self.revelador.set_visible(True)
                 if hasattr(self, "cabecalho"):
-                    self.cabecalho.set_opacity(0.0)
-                    self.cabecalho.set_can_target(False)
+                    self.cabecalho.set_opacity(1.0)
+                    self.cabecalho.set_can_target(True)
                 if hasattr(self, "hero_card"):
                     self.hero_card.set_opacity(1.0)
                 for w_nome in ("hero_topo", "hero_activity_banner", "linha_progresso", "controles", "page_dots_box"):
@@ -4339,42 +4335,69 @@ class Ilha:
         self.notif_detalhe_corpo.set_text(self._notif_dados["body"] or "Sem conteúdo adicional.")
         self.btn_notif_copiar.set_label("󰅍 Copiar")
 
+        # Largura adaptativa estilo Apple Dynamic Island baseada na extensão do conteúdo
+        comp_texto = len(self._notif_dados["app"]) + len(texto or "")
+        largura_alvo = min(430, max(320, 140 + int(comp_texto * 4.2)))
+        self._notif_largura_alvo = largura_alvo
+
         self._render_cabecalho()
 
+        # Brilho luminoso da borda estilo Apple OLED Dynamic Island
+        self.pilula.add_css_class("notificando")
+        if urg == "CRITICAL":
+            self.pilula.add_css_class("notificando-critico")
+
         if not self._expandido:
-            # Se a ilha estava recolhida, anima para 360px compacto
-            self._animar_tamanho(360, self._altura_alvo(False), ms=180)
+            # Efeito de surgimento horizontal (<-->): mola elástica com overshoot sutil (~5.4%)
+            # resposta = 0.38s, amortecimento = 0.68
+            self._animar_tamanho(largura_alvo, self._altura_alvo(False), resposta=0.38, amortecimento=0.68)
         else:
             # Se já estava aberta, mostra o cartão detalhado
             if hasattr(self, "stack"):
                 self.stack.set_visible_child_name("notificacao")
             if hasattr(self, "page_dots_box"):
                 self.page_dots_box.set_visible(False)
-            self._animar_tamanho(380, self._altura_alvo(True), ms=180)
+            self._animar_tamanho(380, self._altura_alvo(True), resposta=0.36, amortecimento=0.75)
 
         # Inicia auto-dismiss (a menos que cursor já esteja sobre a ilha)
         if not self._dentro():
             self._notif_timer = GLib.timeout_add(duracao_ms, self._esconder_hud_notif)
 
     def _esconder_hud_notif(self) -> bool:
+        if not getattr(self, "_notif_ativa", False):
+            return False
+
         self._notif_ativa = False
         self._notif_expandida = False
         if getattr(self, "_notif_timer", 0):
             GLib.source_remove(self._notif_timer)
             self._notif_timer = 0
+
+        # Remove brilho e classes CSS de notificação
+        self.pilula.remove_css_class("notificando")
+        self.pilula.remove_css_class("notificando-critico")
+
         if hasattr(self, "page_dots_box"):
             self.page_dots_box.set_visible(True)
+
         self._render_cabecalho()
+
         if self._expandido and not self._fixado and not self._dentro():
             self.expandir(False)
         elif not self._expandido:
             self._aplicar_conteudo()
+            # Fechamento elástico estilo Apple Dynamic Island (-><-):
+            # Contração fluida com amortecimento firme (zeta=0.92, resposta=0.28s) sem repique
+            largura_retorno = self._largura_alvo(False)
+            altura_retorno = self._altura_alvo(False)
+            self._animar_tamanho(largura_retorno, altura_retorno, resposta=0.28, amortecimento=0.92)
         else:
             if hasattr(self, "stack"):
                 inicial = "midia" if self._tem_player else "produtividade"
                 self._mudar_pagina(inicial)
             self._aplicar_conteudo()
-            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True))
+            self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True), resposta=0.32, amortecimento=0.85)
+
         self._sincronizar_eq()
         return False
 

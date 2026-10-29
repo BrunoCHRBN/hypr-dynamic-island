@@ -18,6 +18,16 @@ window { background: transparent; }
   box-shadow: 0 0 14px rgba(203, 166, 247, 0.4);
 }
 
+#ilha.notificando {
+  border-color: rgba(203, 166, 247, 0.55);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 16px rgba(203, 166, 247, 0.28);
+}
+
+#ilha.notificando-critico {
+  border-color: rgba(243, 139, 168, 0.70);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 18px rgba(243, 139, 168, 0.38);
+}
+
 #pilula-progresso {
   padding: 0;
   margin: 1px 4px 0 4px;
