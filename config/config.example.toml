@@ -1,0 +1,31 @@
+# Configuração da Dynamic Island
+[geral]
+# Cidade usada para previsão do tempo (wttr.in)
+cidade = "Araraquara"
+
+# Monitor primário onde a ilha é desenhada
+monitor = "DP-2"
+
+# Margem em pixels a partir do topo do monitor
+margem_topo = 8
+
+[rede]
+# Nome da conexão de VPN gerenciada pelo NetworkManager
+vpn_conexao = "Cloudflare-WARP"
+
+# URL da API do AdGuard Home local
+adguard_url = "http://127.0.0.1:3000"
+
+[audio]
+# Substring para identificar o sink de fones/analógico
+sink_fones = "analog-stereo"
+
+# Substring para identificar o sink do monitor/HDMI
+sink_monitor = "hdmi-stereo"
+
+[mpris]
+# Intervalo em milissegundos para interpolação da barra de progresso (padrão: 500)
+tick_posicao_ms = 500
+
+# Intervalo em segundos para ressincronização completa de posição via D-Bus (padrão: 5.0)
+resync_intervalo_s = 5.0

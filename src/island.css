@@ -1,0 +1,792 @@
+window { background: transparent; }
+
+#ilha {
+  background-color: #0c0d14;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 19px;
+  padding: 5px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  transition: border-color 240ms ease, box-shadow 240ms ease, border-radius 240ms ease;
+}
+
+#ilha.expandido {
+  border-radius: 22px;
+}
+
+#ilha.fixado {
+  border-color: #cba6f7;
+  box-shadow: 0 0 14px rgba(203, 166, 247, 0.4);
+}
+
+#pilula-progresso {
+  padding: 0;
+  margin: 1px 4px 0 4px;
+}
+#pilula-progresso > trough {
+  min-height: 2px;
+  border-radius: 1px;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+#pilula-progresso > trough > progress {
+  min-height: 2px;
+  border-radius: 1px;
+  background-color: #cba6f7;
+}
+
+#cabecalho { min-height: 24px; padding: 0 2px; }
+
+/* Trilho tátil para os pontos das áreas de trabalho */
+#dots-track {
+  background-color: rgba(17, 17, 27, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 3px 6px;
+}
+
+.ws-dot {
+  min-width: 6px;
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #313244;
+  margin: 0 2px;
+  transition: all 180ms ease;
+}
+.ws-dot:hover {
+  background-color: #cdd6f4;
+}
+.ws-dot.ocupado {
+  background-color: #6c7086;
+}
+.ws-dot.ativo {
+  min-width: 16px;
+  background-color: #cba6f7;
+}
+
+#ponto {
+  color: #45475a;
+  font-size: 8px;
+  padding: 1px 2px;
+  transition: all 120ms ease;
+}
+#ponto:hover {
+  color: #cdd6f4;
+}
+#ponto.ativo {
+  color: #cba6f7;
+}
+
+#capa { border-radius: 6px; }
+#titulo { color: #cdd6f4; font-weight: 600; font-size: 12px; }
+#artista { color: #a6adc8; font-size: 11px; }
+#relogio {
+  color: #cdd6f4;
+  font-weight: 600;
+  font-size: 12px;
+  font-feature-settings: "tnum";
+}
+#pin-icone {
+  color: #cba6f7;
+  font-size: 11px;
+  margin-left: 2px;
+}
+#eq {
+  color: #a6e3a1;
+  font-size: 11px;
+  margin-right: 2px;
+  transition: color 240ms ease;
+}
+
+/* Atividades ao Vivo (Live Activities) & Privacidade */
+#ativ-box {
+  padding: 0 4px;
+}
+#ativ-icone {
+  font-size: 12px;
+  color: #f38ba8;
+}
+#ativ-texto {
+  font-size: 11px;
+  font-weight: 600;
+  color: #cdd6f4;
+}
+#ativ-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #f38ba8;
+  background-color: rgba(243, 139, 168, 0.15);
+  border: 1px solid rgba(243, 139, 168, 0.3);
+  border-radius: 8px;
+  padding: 1px 6px;
+  margin: 0 4px;
+}
+
+#mic-indicador {
+  color: #fab387;
+  font-size: 11px;
+  margin-right: 2px;
+}
+#rec-indicador {
+  color: #f38ba8;
+  font-size: 11px;
+  margin-right: 2px;
+}
+
+#hero-activity-banner {
+  background-color: rgba(17, 17, 27, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+#hero-activity-icon-box {
+  background-color: rgba(243, 139, 168, 0.15);
+  border-radius: 8px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px;
+}
+#hero-activity-icon {
+  font-size: 15px;
+  color: #f38ba8;
+}
+#hero-activity-title {
+  color: #cdd6f4;
+  font-size: 12px;
+  font-weight: 600;
+}
+#hero-activity-subtext {
+  color: #a6adc8;
+  font-size: 10px;
+}
+#hero-activity-btn {
+  background-color: #313244;
+  color: #cdd6f4;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 120ms ease;
+}
+#hero-activity-btn:hover {
+  background-color: #f38ba8;
+  color: #11111b;
+}
+#hero-activity-progresso > trough {
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+#hero-activity-progresso > trough > progress {
+  min-height: 3px;
+  border-radius: 2px;
+  background-color: #f38ba8;
+}
+
+/* Painel e Cartão de Contexto (Hero Card) */
+#painel {
+  padding-top: 4px;
+}
+
+#hero-card {
+  background-color: rgba(30, 30, 46, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Modo Idle Enriquecido (Produtividade e Contexto) */
+#idle-data {
+  color: #cdd6f4;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+#idle-clima {
+  color: #89b4fa;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 4px;
+  border-radius: 4px;
+  transition: all 120ms ease;
+}
+#idle-clima:hover {
+  background-color: #313244;
+}
+
+#cal-semana {
+  padding: 2px 0;
+}
+
+.cal-dia {
+  min-width: 36px;
+  padding: 3px 2px;
+  border-radius: 6px;
+  background-color: transparent;
+  border: 1px solid transparent;
+  transition: all 120ms ease;
+}
+.cal-dia:hover {
+  background-color: #313244;
+}
+
+.cal-dia .dia-nome {
+  font-size: 9px;
+  font-weight: 500;
+  color: #6c7086;
+}
+
+.cal-dia .dia-num {
+  font-size: 11px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  color: #bac2de;
+}
+
+.cal-dia.dia-hoje {
+  background-color: #89b4fa;
+  border-color: #89b4fa;
+}
+
+.cal-dia.dia-hoje .dia-nome {
+  color: #11111b;
+  font-weight: 700;
+}
+
+.cal-dia.dia-hoje .dia-num {
+  color: #11111b;
+  font-weight: 800;
+}
+
+#data {
+  color: #a6adc8;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+#janela-icone {
+  color: #cba6f7;
+  font-size: 12px;
+}
+
+#janela {
+  color: #cdd6f4;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+#idle-uptime {
+  color: #9399b2;
+  font-size: 10px;
+  font-feature-settings: "tnum";
+  font-weight: 500;
+}
+
+/* Card de Mídia Refinado (Now Playing) */
+#hero-capa {
+  border-radius: 8px;
+  background-color: #11111b;
+  min-width: 60px;
+  min-height: 60px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+#hero-titulo {
+  color: #cdd6f4;
+  font-size: 13px;
+  font-weight: 700;
+}
+#hero-artista {
+  color: #bac2de;
+  font-size: 11px;
+  font-weight: 500;
+}
+#hero-album {
+  color: #9399b2;
+  font-size: 10px;
+}
+#hero-tempo-atual, #hero-tempo-total {
+  font-size: 10px;
+  font-feature-settings: "tnum";
+}
+#hero-tempo-atual {
+  color: #a6adc8;
+}
+#hero-tempo-total {
+  color: #6c7086;
+}
+
+progressbar {
+  padding: 4px 0;
+}
+progressbar > trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: #313244;
+  transition: min-height 120ms ease;
+}
+progressbar:hover > trough {
+  min-height: 6px;
+}
+progressbar > trough > progress {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: #cba6f7;
+  transition: min-height 120ms ease;
+}
+progressbar:hover > trough > progress {
+  min-height: 6px;
+}
+progressbar.spotify > trough > progress {
+  background-color: #a6e3a1;
+}
+
+button.controle {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+  min-width: 24px;
+  min-height: 24px;
+  color: #cdd6f4;
+}
+button.controle:hover { background-color: #313244; border-radius: 12px; }
+button.controle:active { background-color: #45475a; border-radius: 12px; }
+button.controle:disabled { color: #45475a; }
+
+button.controle.play-btn {
+  background-color: #313244;
+  color: #cdd6f4;
+  border-radius: 18px;
+  padding: 4px;
+  min-width: 36px;
+  min-height: 36px;
+  transition: all 140ms ease;
+}
+button.controle.play-btn:hover {
+  background-color: #45475a;
+}
+button.controle.play-btn.spotify {
+  background-color: #a6e3a1;
+  color: #11111b;
+}
+button.controle.play-btn.spotify:hover {
+  background-color: #94e2d5;
+}
+
+/* Chips de Métricas do Sistema táteis */
+/* Sessões Paginadas e Indicador de Páginas */
+#page-dots {
+  margin-top: 5px;
+  padding: 1px 0;
+}
+
+.page-dot {
+  min-width: 8px;
+  min-height: 6px;
+  border-radius: 4px;
+  padding: 3px 4px;
+  background-color: #45475a;
+  background-clip: content-box;
+  transition: all 180ms ease;
+}
+
+.page-dot:hover {
+  background-color: #89b4fa;
+}
+
+.page-dot.ativo {
+  min-width: 20px;
+  background-color: #89b4fa;
+}
+
+/* Página 1: Mídia Estado Vazio */
+.media-empty-icon {
+  font-size: 24px;
+  color: #a6e3a1;
+}
+
+.media-empty-titulo {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a6adc8;
+}
+
+.media-empty-btn {
+  background-color: #1e1e2e;
+  border: 1px solid #313244;
+  color: #cdd6f4;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  transition: all 120ms ease;
+}
+.media-empty-btn:hover {
+  background-color: #313244;
+  border-color: #a6e3a1;
+  color: #a6e3a1;
+}
+
+/* Página 3: Central de Controle & Sistema */
+.sys-row {
+  min-height: 20px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  transition: background-color 120ms ease;
+}
+.sys-row:hover {
+  background-color: rgba(49, 50, 68, 0.45);
+}
+
+.sys-icone {
+  font-size: 12px;
+  min-width: 16px;
+}
+.sys-icone.cpu { color: #fab387; }
+.sys-icone.mem { color: #cba6f7; }
+.sys-icone.vol { color: #89b4fa; }
+.sys-icone.vol.mudo { color: #f38ba8; }
+
+.sys-nome {
+  font-size: 10px;
+  font-weight: 600;
+  color: #a6adc8;
+  min-width: 26px;
+}
+
+.sys-val {
+  font-size: 10px;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  color: #cdd6f4;
+  min-width: 32px;
+}
+
+progressbar.sys-barra {
+  padding: 2px 0;
+}
+progressbar.sys-barra > trough {
+  min-height: 5px;
+  border-radius: 3px;
+  background-color: #313244;
+}
+progressbar.sys-barra > trough > progress {
+  min-height: 5px;
+  border-radius: 3px;
+}
+progressbar.sys-barra.cpu > trough > progress {
+  background-color: #fab387;
+}
+progressbar.sys-barra.mem > trough > progress {
+  background-color: #cba6f7;
+}
+progressbar.sys-barra.vol > trough > progress {
+  background-color: #89b4fa;
+}
+
+.sys-sep {
+  min-height: 1px;
+  background-color: #313244;
+  margin: 3px 0;
+}
+
+/* Barra de Ações Rápidas (Página 3) */
+#acoes-box {
+  background: none;
+  border: none;
+  padding: 2px 0 0 0;
+}
+
+button.acao-btn {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px 5px;
+  min-width: 26px;
+  min-height: 24px;
+  color: #a6adc8;
+  border-radius: 6px;
+  transition: all 120ms ease;
+}
+button.acao-btn:hover {
+  background-color: #313244;
+  color: #cdd6f4;
+}
+button.acao-btn:active {
+  background-color: #45475a;
+  color: #cba6f7;
+}
+button.acao-btn.power:hover {
+  background-color: rgba(243, 139, 168, 0.18);
+  color: #f38ba8;
+}
+button.acao-btn.dnd-ativo {
+  background-color: rgba(249, 226, 175, 0.15);
+  color: #f9e2af;
+}
+button.acao-btn.dnd-ativo:hover {
+  background-color: rgba(249, 226, 175, 0.25);
+}
+
+/* Compatibilidade retroativa */
+#footer-box {
+  background: none;
+  border: none;
+  padding: 0;
+}
+#sistema-box {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* HUD transitório de volume */
+#hud-box {
+  padding: 0 2px;
+}
+#hud-icone {
+  color: #cba6f7;
+  font-size: 13px;
+}
+#hud-icone.mudo {
+  color: #f38ba8;
+}
+#hud-pct {
+  color: #cdd6f4;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 34px;
+}
+#hud-barra > trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #313244;
+}
+#hud-barra > trough > progress {
+  min-height: 6px;
+  border-radius: 3px;
+  background-color: #cba6f7;
+}
+
+/* HUD transitório de Notificação (Estilo Dynamic Island) */
+#notif-box {
+  padding: 0 4px;
+}
+#notif-icone {
+  color: #cba6f7;
+  font-size: 13px;
+  margin-right: 4px;
+}
+#notif-icone.critico {
+  color: #f38ba8;
+}
+#notif-icone.dnd {
+  color: #f9e2af;
+}
+#notif-app {
+  color: #cdd6f4;
+  font-weight: 700;
+  font-size: 11px;
+}
+#notif-sep {
+  color: #6c7086;
+  font-size: 10px;
+}
+#notif-texto {
+  color: #a6adc8;
+  font-size: 11px;
+}
+
+/* Indicador de Não Perturbe */
+#dnd-icone {
+  color: #f9e2af;
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+/* Cartão Expandido de Notificação */
+#notif-detalhe-app {
+  color: #cba6f7;
+  font-weight: 700;
+  font-size: 11px;
+}
+#notif-detalhe-tempo {
+  color: #6c7086;
+  font-size: 10px;
+}
+#notif-detalhe-titulo {
+  color: #cdd6f4;
+  font-weight: 700;
+  font-size: 13px;
+}
+#notif-detalhe-corpo {
+  color: #bac2de;
+  font-size: 11px;
+  line-height: 1.35;
+}
+button.notif-btn {
+  background-color: #11111b;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: #cdd6f4;
+  font-size: 10px;
+  font-weight: 600;
+  transition: all 120ms ease;
+}
+button.notif-btn:hover {
+  background-color: #26273b;
+  border-color: #cba6f7;
+  color: #cba6f7;
+}
+button.notif-btn.fechar:hover {
+  background-color: rgba(243, 139, 168, 0.15);
+  border-color: #f38ba8;
+  color: #f38ba8;
+}
+
+/* Quick Toggles da Central de Controle (Página 3) */
+.quick-toggle {
+  background-color: rgba(49, 50, 68, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 5px 8px;
+  color: #a6adc8;
+  font-size: 11px;
+  font-weight: 600;
+  min-height: 28px;
+  box-shadow: none;
+  transition: all 140ms ease;
+}
+.quick-toggle:hover {
+  background-color: rgba(69, 71, 90, 0.7);
+  color: #cdd6f4;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.quick-toggle.ativo-hotspot {
+  background-color: rgba(137, 180, 250, 0.22);
+  border-color: rgba(137, 180, 250, 0.55);
+  color: #89b4fa;
+}
+.quick-toggle.ativo-hotspot:hover {
+  background-color: rgba(137, 180, 250, 0.32);
+}
+.quick-toggle.ativo-vpn {
+  background-color: rgba(203, 166, 247, 0.22);
+  border-color: rgba(203, 166, 247, 0.55);
+  color: #cba6f7;
+}
+.quick-toggle.ativo-vpn:hover {
+  background-color: rgba(203, 166, 247, 0.32);
+}
+.quick-toggle.ativo-adguard {
+  background-color: rgba(166, 227, 161, 0.22);
+  border-color: rgba(166, 227, 161, 0.55);
+  color: #a6e3a1;
+}
+.quick-toggle.ativo-adguard:hover {
+  background-color: rgba(166, 227, 161, 0.32);
+}
+.quick-toggle.phone-chip {
+  background-color: rgba(49, 50, 68, 0.55);
+  color: #cdd6f4;
+}
+.quick-toggle.phone-chip.charging {
+  background-color: rgba(166, 227, 161, 0.18);
+  border-color: rgba(166, 227, 161, 0.45);
+  color: #a6e3a1;
+}
+
+/* Seletor de Saída de Áudio (Fones / Monitor) */
+button.btn-sink {
+  background-color: rgba(49, 50, 68, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 1px 7px;
+  color: #bac2de;
+  font-size: 10px;
+  font-weight: 600;
+  min-height: 20px;
+  box-shadow: none;
+  transition: all 120ms ease;
+}
+button.btn-sink:hover {
+  background-color: #45475a;
+  color: #cdd6f4;
+  border-color: #89b4fa;
+}
+
+/* Página 4: Histórico de Notificações */
+#page-historico {
+  padding: 2px 0;
+}
+.notif-hist-header {
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 4px;
+}
+.notif-hist-header-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #cdd6f4;
+}
+.notif-hist-badge {
+  background-color: rgba(137, 180, 250, 0.18);
+  border-radius: 8px;
+  padding: 0 5px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #89b4fa;
+}
+button.btn-limpar-hist {
+  background: none;
+  border: none;
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6c7086;
+  border-radius: 6px;
+  padding: 1px 6px;
+  transition: all 120ms ease;
+}
+button.btn-limpar-hist:hover {
+  background-color: rgba(243, 139, 168, 0.18);
+  color: #f38ba8;
+}
+.notif-hist-card {
+  background-color: rgba(17, 17, 27, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 5px 8px;
+  transition: all 120ms ease;
+}
+.notif-hist-card:hover {
+  background-color: rgba(49, 50, 68, 0.4);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.notif-hist-app {
+  font-size: 9px;
+  font-weight: 700;
+  color: #89b4fa;
+}
+.notif-hist-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #cdd6f4;
+}
+.notif-hist-body {
+  font-size: 10px;
+  color: #a6adc8;
+}
+.notif-hist-empty-box {
+  padding: 20px 0;
+}
+.notif-hist-empty-ico {
+  font-size: 26px;
+  color: #45475a;
+}
+.notif-hist-empty-txt {
+  font-size: 11px;
+  font-weight: 500;
+  color: #6c7086;
+}

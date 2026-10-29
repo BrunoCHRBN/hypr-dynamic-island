@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""
+island-activity — Utilitário CLI para empurrar Live Activities para a Dynamic Island.
+
+Exemplos de uso:
+  island-activity set pomodoro "Estudo ITA" --icon "󰔟" --subtext "24:15 restantes" --progress 0.45
+  island-activity end pomodoro
+  island-activity clear
+
+  # Timer de estudo integrado com contagem regressiva em segundo plano:
+  island-activity timer 25m "Foco ITA"
+  island-activity stop-timer
+"""
+import os
+import sys
+import time
+import json
+import socket
+import argparse
+import subprocess
+
+PID_FILE = "/tmp/island-timer.pid"
+
+def enviar_ipc(payload: dict) -> bool:
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    sock_path = f"{rt}/island.sock"
+    if not os.path.exists(sock_path):
+        return False
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(json.dumps(payload).encode("utf-8"), sock_path)
+        s.close()
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar para {sock_path}: {e}", file=sys.stderr)
+        return False
+
+def parse_duracao(texto: str) -> int:
+    """Converte '25m', '1h', '45s', '90' em segundos inteiros."""
+    t = texto.strip().lower()
+    if t.endswith("m"):
+        return int(float(t[:-1]) * 60)
+    elif t.endswith("h"):
+        return int(float(t[:-1]) * 3600)
+    elif t.endswith("s"):
+        return int(float(t[:-1]))
+    return int(float(t))
+
+def rodar_timer_loop(total_segundos: int, titulo: str):
+    inicio = time.time()
+    fim = inicio + total_segundos
+
+    while True:
+        agora = time.time()
+        restante = int(max(0, fim - agora))
+        decorrido = total_segundos - restante
+        progresso = min(1.0, max(0.0, decorrido / total_segundos))
+
+        mins = restante // 60
+        segs = restante % 60
+        tempo_str = f"{mins:02d}:{segs:02d}"
+
+        enviar_ipc({
+            "action": "activity",
+            "id": "timer",
+            "icon": "󰔟",
+            "text": f"{titulo} ({tempo_str})",
+            "subtext": f"{tempo_str} restantes",
+            "progress": progresso,
+            "color": "#f38ba8"
+        })
+
+        if restante <= 0:
+            break
+        time.sleep(1.0)
+
+    # Finalizado
+    enviar_ipc({"action": "activity_end", "id": "timer"})
+    try:
+        notify_bin = os.path.expanduser("~/.local/bin/island-notify")
+        if os.path.exists(notify_bin):
+            subprocess.run([notify_bin, "Timer", f"{titulo} Concluído!", "Tempo esgotado!", "NORMAL", "CRITICAL"])
+        else:
+            subprocess.run(["notify-send", "-u", "critical", f"Timer: {titulo}", "Tempo de foco finalizado!"])
+    except Exception:
+        pass
+    if os.path.exists(PID_FILE):
+        try:
+            os.remove(PID_FILE)
+        except Exception:
+            pass
+
+def parar_timer():
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 15)
+        except Exception:
+            pass
+        try:
+            os.remove(PID_FILE)
+        except Exception:
+            pass
+    enviar_ipc({"action": "activity_end", "id": "timer"})
+    print("Timer cancelado.")
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    cmd = sys.argv[1].lower()
+
+    if cmd == "end":
+        id_ativ = sys.argv[2] if len(sys.argv) > 2 else "padrao"
+        enviar_ipc({"action": "activity_end", "id": id_ativ})
+        sys.exit(0)
+
+    if cmd == "clear":
+        enviar_ipc({"action": "activity_clear"})
+        sys.exit(0)
+
+    if cmd == "stop-timer":
+        parar_timer()
+        sys.exit(0)
+
+    if cmd == "timer":
+        if len(sys.argv) < 3:
+            print("Uso: island-activity timer <tempo, ex: 25m> [titulo]")
+            sys.exit(1)
+        dur_str = sys.argv[2]
+        titulo = sys.argv[3] if len(sys.argv) > 3 else "Foco"
+        segundos = parse_duracao(dur_str)
+
+        # Encerra timer anterior se existir
+        parar_timer()
+
+        # Cria processo daemon desanexado
+        pid = os.fork()
+        if pid == 0:
+            # Filho
+            os.setsid()
+            with open(PID_FILE, "w") as f:
+                f.write(str(os.getpid()))
+            rodar_timer_loop(segundos, titulo)
+            sys.exit(0)
+        else:
+            # Pai
+            print(f"Timer de {dur_str} iniciado para '{titulo}' (PID {pid}).")
+            sys.exit(0)
+
+    argv = sys.argv[1:]
+    if argv and argv[0] == "set":
+        argv = argv[1:]
+        if not argv:
+            print("Uso: island-activity set <id> <texto> [--icon ...]")
+            sys.exit(1)
+        id_ativ = argv.pop(0)
+        parser = argparse.ArgumentParser(prog="island-activity set")
+        parser.add_argument("texto", nargs="?", default="")
+        parser.add_argument("--icon", "-i", default="󰔟")
+        parser.add_argument("--subtext", "-s", default="")
+        parser.add_argument("--progress", "-p", type=float, default=None)
+        parser.add_argument("--color", "-c", default="#cba6f7")
+        parser.add_argument("--ttl", "-t", type=int, default=0)
+        args, extras = parser.parse_known_args(argv)
+        texto = (args.texto + (" " + " ".join(extras) if extras else "")).strip()
+        enviar_ipc({
+            "action": "activity",
+            "id": id_ativ,
+            "icon": args.icon,
+            "text": texto or id_ativ,
+            "subtext": args.subtext,
+            "progress": args.progress,
+            "color": args.color,
+            "ttl": args.ttl,
+        })
+        sys.exit(0)
+
+    # Chamada direta: island-activity <id> <texto>
+    parser = argparse.ArgumentParser(prog="island-activity", description="Publica Live Activities na Dynamic Island")
+    parser.add_argument("id", nargs="?", default="padrao")
+    parser.add_argument("texto", nargs="?", default="")
+    parser.add_argument("--icon", "-i", default="󰔟", help="Ícone Nerd Font")
+    parser.add_argument("--subtext", "-s", default="", help="Subtexto ou descrição")
+    parser.add_argument("--progress", "-p", type=float, default=None, help="Progresso de 0.0 a 1.0")
+    parser.add_argument("--color", "-c", default="#cba6f7", help="Cor de destaque hex")
+    parser.add_argument("--ttl", "-t", type=int, default=0, help="Tempo de vida em segundos (0 = persistente)")
+
+    args, desconhecidos = parser.parse_known_args(argv)
+    texto = (args.texto + (" " + " ".join(desconhecidos) if desconhecidos else "")).strip()
+
+    enviar_ipc({
+        "action": "activity",
+        "id": args.id,
+        "icon": args.icon,
+        "text": texto or args.id,
+        "subtext": args.subtext,
+        "progress": args.progress,
+        "color": args.color,
+        "ttl": args.ttl,
+    })
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,22 @@
+#!/bin/bash
+# Wrapper da dynamic island.
+#
+# LD_PRELOAD: necessário para o gtk4-layer-shell inicializar antes do libwayland.
+if [ -f /usr/lib/libgtk4-layer-shell.so ]; then
+    export LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so
+elif [ -f /usr/lib64/libgtk4-layer-shell.so ]; then
+    export LD_PRELOAD=/usr/lib64/libgtk4-layer-shell.so
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$HOME/.config/hypr/scripts/island.py" ]; then
+    TARGET="$HOME/.config/hypr/scripts/island.py"
+elif [ -f "$SCRIPT_DIR/src/island.py" ]; then
+    TARGET="$SCRIPT_DIR/src/island.py"
+elif [ -f "$SCRIPT_DIR/island.py" ]; then
+    TARGET="$SCRIPT_DIR/island.py"
+else
+    TARGET="island.py"
+fi
+
+exec python3 -u "$TARGET" "$@"

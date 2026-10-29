@@ -1,0 +1,15 @@
+[Unit]
+Description=Dynamic island (barra do topo do Hyprland)
+# Sem [Install] de proposito: neste Hyprland o graphical-session.target fica
+# inactive (medido), entao "enable" nao faria a unidade subir no login. Quem da
+# o start e o exec-once do hyprland.conf:
+#     exec-once = systemctl --user start island.service
+# O Restart=on-failure cobre o caso de o processo morrer sozinho.
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/island --monitor DP-2
+Restart=on-failure
+RestartSec=2

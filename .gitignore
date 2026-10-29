@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak*
+*.swp
+*.swo
+*~
+.DS_Store
+*.pid
+*.sock
