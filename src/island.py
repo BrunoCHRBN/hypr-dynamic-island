@@ -38,6 +38,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import colorsys
 import datetime
 import glob
 import hashlib
@@ -212,11 +213,13 @@ class Mpris:
         self.proxy: Gio.DBusProxy | None = None
         self.nome: str | None = None
         self._nomes_cache: list[str] | None = None
+        self._proxies: dict[str, Gio.DBusProxy] = {}
         self._fixado_manual: str | None = None
         # Identity por (player, título): o KDE Connect troca o Identity no
         # mesmo nome de barramento quando o app do celular muda ("YouTube -
         # Galaxy A15 5G" -> "Spotify - ..."), então a chave inclui a faixa.
         self._ident: tuple[tuple[str, str], str] | None = None
+        self._desktop_entry_cache: dict[str, str] = {}
         self._pos_base_us: int = 0
         self._pos_timestamp: float = time.monotonic()
         self._playback_rate: float = 1.0
@@ -227,6 +230,11 @@ class Mpris:
             "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
             "/org/freedesktop/DBus", None, Gio.DBusSignalFlags.NONE,
             self._ao_name_owner_changed)
+        # Ouve mudanças de PlaybackStatus em qualquer player MPRIS para trocar automaticamente
+        self.bus.signal_subscribe(
+            None, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+            CAMINHO_MPRIS, IFACE_PLAYER, Gio.DBusSignalFlags.NONE,
+            self._ao_props_qualquer_player)
         # idle: escolher() notifica o dono, que ainda está sendo construído
         GLib.idle_add(self.escolher)
 
@@ -235,6 +243,17 @@ class Mpris:
             nome, _old, _new = params.unpack()
             if nome.startswith("org.mpris.MediaPlayer2."):
                 self._nomes_cache = None
+                if not _new:
+                    self._proxies.pop(nome, None)
+                    self._desktop_entry_cache.pop(nome, None)
+                GLib.idle_add(self.escolher)
+        except Exception:
+            pass
+
+    def _ao_props_qualquer_player(self, _conn, _sender, _path, _iface, _signal, params, _user_data=None) -> None:
+        try:
+            changed = params.unpack()[1]
+            if "PlaybackStatus" in changed:
                 GLib.idle_add(self.escolher)
         except Exception:
             pass
@@ -247,17 +266,23 @@ class Mpris:
             r = self.bus.call_sync(
                 "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                 "ListNames", None, GLib.VariantType.new("(as)"),
-                Gio.DBusCallFlags.NONE, -1, None)
+                Gio.DBusCallFlags.NONE, 250, None)
             self._nomes_cache = [n for n in r.unpack()[0] if n.startswith("org.mpris.MediaPlayer2.")]
         except Exception:
             self._nomes_cache = []
         return self._nomes_cache
 
     def _proxy(self, nome: str):
+        if nome in self._proxies:
+            return self._proxies[nome]
         try:
-            return Gio.DBusProxy.new_sync(
+            p = Gio.DBusProxy.new_sync(
                 self.bus, Gio.DBusProxyFlags.NONE, None, nome, CAMINHO_MPRIS,
                 IFACE_PLAYER, None)
+            self._proxies[nome] = p
+            return p
+        except GLib.Error:
+            return None
         except GLib.Error:
             return None
 
@@ -321,8 +346,13 @@ class Mpris:
                 pass
 
     def _ao_mudar_propriedades(self, proxy, changed_properties, invalidated_properties) -> None:
+        mudancas = changed_properties.unpack() if hasattr(changed_properties, "unpack") else {}
+        st_ant = self._status
         st = self._prop(proxy, "PlaybackStatus") or "Stopped"
         self._status = st
+        if st_ant == "Playing" and st != "Playing":
+            self._pos_base_us = self.posicao_estimada()
+            self._pos_timestamp = time.monotonic()
         rate = self._prop(proxy, "Rate")
         if rate is not None:
             try:
@@ -331,14 +361,18 @@ class Mpris:
                 self._playback_rate = 1.0
         md = self._prop(proxy, "Metadata") or {}
         self._duracao = int(md.get("mpris:length") or 0)
-        self.sincronizar_posicao()
+        if not mudancas or any(k in mudancas for k in ("Metadata", "PlaybackStatus", "Rate")):
+            self.sincronizar_posicao()
         self.ao_mudar()
 
-    def sincronizar_posicao(self) -> None:
+    def sincronizar_posicao(self, forcar: bool = False) -> None:
         def _cb(pos):
-            self._pos_base_us = pos
-            self._pos_timestamp = time.monotonic()
-            self._ultimo_sync_d_bus = self._pos_timestamp
+            estimado = self.posicao_estimada()
+            desvio_us = abs(pos - estimado)
+            if forcar or desvio_us > 1_500_000 or self._status != "Playing":
+                self._pos_base_us = pos
+                self._pos_timestamp = time.monotonic()
+            self._ultimo_sync_d_bus = time.monotonic()
         self.posicao(_cb)
 
     def posicao_estimada(self) -> int:
@@ -351,14 +385,24 @@ class Mpris:
         return max(0, estimado)
 
     # -- leitura ------------------------------------------------------------
-    def identidade(self, titulo: str = "") -> str:
-        """Nome legível do player (propriedade MPRIS `Identity`).
+    def desktop_entry(self) -> str:
+        if not self.nome:
+            return ""
+        if self.nome in self._desktop_entry_cache:
+            return self._desktop_entry_cache[self.nome]
+        try:
+            r = self.bus.call_sync(
+                self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", ("org.mpris.MediaPlayer2", "DesktopEntry")),
+                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 200, None)
+            val = str(r.unpack()[0] or "").strip()
+        except GLib.Error:
+            val = ""
+        self._desktop_entry_cache[self.nome] = val
+        return val
 
-        Sem isto o rótulo saía do nome de barramento — medido com o KDE
-        Connect: "Mpris_8721b169f4354ee7a0abc101286d4e9b", quando o Identity
-        diz "YouTube - Galaxy A15 5G". A interface é a raiz
-        (org.mpris.MediaPlayer2), não a Player, por isso vai pelo barramento.
-        """
+    def identidade(self, titulo: str = "") -> str:
+        """Nome legível do player (propriedade MPRIS `Identity`)."""
         if not self.nome:
             return ""
         chave = (self.nome, titulo)
@@ -368,7 +412,7 @@ class Mpris:
             r = self.bus.call_sync(
                 self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Get",
                 GLib.Variant("(ss)", ("org.mpris.MediaPlayer2", "Identity")),
-                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 300, None)
+                GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 200, None)
             valor = str(r.unpack()[0] or "").strip()
         except GLib.Error:
             valor = ""
@@ -388,45 +432,53 @@ class Mpris:
         self._status = st
         dur = int(md.get("mpris:length") or 0)
         self._duracao = dur
+        titulo = str(md.get("xesam:title") or "").strip()
+        url = str(md.get("xesam:url") or "").strip()
+        if not titulo and url:
+            caminho_url = urllib.parse.unquote(url)
+            titulo = os.path.basename(caminho_url) or "Áudio em reprodução"
+
+        pode_play = self._prop(p, "CanPlay")
+        pode_pause = self._prop(p, "CanPause")
+
         return {
-            "titulo": str(md.get("xesam:title") or ""),
+            "titulo": titulo,
             "artista": ", ".join(str(a) for a in artistas),
             "album": str(md.get("xesam:album") or ""),
             "art": str(md.get("mpris:artUrl") or ""),
+            "url": url,
             "duracao": dur,
             "status": st,
             "pode_prox": bool(self._prop(p, "CanGoNext")),
             "pode_ant": bool(self._prop(p, "CanGoPrevious")),
+            "pode_play": bool(pode_play) if pode_play is not None else True,
+            "pode_pause": bool(pode_pause) if pode_pause is not None else True,
+            "pode_seek": bool(self._prop(p, "CanSeek")),
+            "loop_status": self._prop(p, "LoopStatus") or "None",
+            "shuffle": bool(self._prop(p, "Shuffle")),
             "trackid": str(md.get("mpris:trackid") or ""),
             "player": self.nome or "",
             "volume": float(vol_prop if vol_prop is not None else 1.0),
         }
 
-    def ajustar_volume(self, delta: float) -> None:
-        """Volume do PRÓPRIO player (0..1), pela propriedade MPRIS `Volume`.
-
-        Antes ia por `playerctl volume`, que sem --player age sobre o player
-        que o playerctl escolher — não necessariamente o que a ilha mostra.
-        """
+    def ajustar_volume(self, delta: float) -> float | None:
+        """Volume do PRÓPRIO player (0..1), pela propriedade MPRIS `Volume`."""
         p = self.proxy
         if p is None or not self.nome or not delta:
-            return
+            return None
         atual = self._prop(p, "Volume")
-        if atual is None:
-            return
-        novo = max(0.0, min(1.0, float(atual) + delta))
-        log(f"volume do player: {atual:.2f} -> {novo:.2f}")
-        self.bus.call(
-            self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Set",
-            GLib.Variant("(ssv)", (IFACE_PLAYER, "Volume", GLib.Variant("d", novo))),
-            None, Gio.DBusCallFlags.NONE, 300, None, None)
+        if atual is not None:
+            novo = max(0.0, min(1.0, float(atual) + delta))
+            log(f"volume do player: {atual:.2f} -> {novo:.2f}")
+            self.bus.call(
+                self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Set",
+                GLib.Variant("(ssv)", (IFACE_PLAYER, "Volume", GLib.Variant("d", novo))),
+                None, Gio.DBusCallFlags.NONE, 300, None, None)
+            return novo
+        return None
 
     def posicao(self, cb) -> None:
-        """MPRIS não emite sinal de Position: tem de perguntar.
-
-        Vai pelo barramento direto porque Gio.DBusProxy.call fixa a interface
-        do proxy (Player) — Properties.Get precisa da interface Properties.
-        """
+        """Consulta a posição do player via D-Bus assíncrono."""
         if self.proxy is None or not self.nome:
             return
         self.bus.call(
@@ -445,16 +497,13 @@ class Mpris:
         if self.proxy is None:
             return
         log(f"comando: {metodo}")
-        # Assinatura real (conferida em Gio.DBusProxy.call.__doc__):
-        #   call(method_name, parameters=None, flags, timeout_msec,
-        #        cancellable=None, callback=None, user_data=None)
-        # NÃO existe reply_type aqui — passar um no lugar das flags dá
-        # "flag values must be strings, ints, longs, or tuples".
         self.proxy.call(metodo, None, Gio.DBusCallFlags.NONE, 300, None, None)
 
     def seek(self, alvo_us: int) -> None:
-        """Pula para a posição absoluta alvo_us (em microssegundos)."""
+        """Pula para a posição absoluta alvo_us de forma segura com fallback garantido."""
         if self.proxy is None or not self.nome:
+            return
+        if not bool(self._prop(self.proxy, "CanSeek")):
             return
         log(f"seek para {alvo_us} us")
         self._pos_base_us = int(alvo_us)
@@ -463,30 +512,59 @@ class Mpris:
         md = self._prop(self.proxy, "Metadata") or {}
         trackid = md.get("mpris:trackid")
 
-        if isinstance(trackid, str) and trackid.startswith("/"):
-            try:
-                self.proxy.call(
-                    "SetPosition",
-                    GLib.Variant("(ox)", (trackid, int(alvo_us))),
-                    Gio.DBusCallFlags.NONE, 300, None, None,
-                )
-                return
-            except Exception as e:
-                log(f"SetPosition falhou: {e}")
+        def _fallback_relativo():
+            def aplica_seek(pos_atual):
+                diff = int(alvo_us - pos_atual)
+                try:
+                    self.proxy.call(
+                        "Seek",
+                        GLib.Variant("(x)", (diff,)),
+                        Gio.DBusCallFlags.NONE, 300, None, None,
+                    )
+                except Exception as e:
+                    log(f"Seek falhou: {e}")
+            self.posicao(aplica_seek)
 
-        # Fallback para Seek relativo (offset em relação à posição atual)
-        def aplica_seek(pos_atual):
-            diff = int(alvo_us - pos_atual)
-            try:
-                self.proxy.call(
-                    "Seek",
-                    GLib.Variant("(x)", (diff,)),
-                    Gio.DBusCallFlags.NONE, 300, None, None,
-                )
-            except Exception as e:
-                log(f"Seek falhou: {e}")
+        if isinstance(trackid, str) and trackid.startswith("/") and not trackid.endswith("/NoTrack"):
+            def _ao_set_position(proxy, res):
+                try:
+                    proxy.call_finish(res)
+                except Exception:
+                    _fallback_relativo()
 
-        self.posicao(aplica_seek)
+            self.proxy.call(
+                "SetPosition",
+                GLib.Variant("(ox)", (trackid, int(alvo_us))),
+                Gio.DBusCallFlags.NONE, 300, None,
+                _ao_set_position,
+            )
+        else:
+            _fallback_relativo()
+
+    def alternar_shuffle(self) -> None:
+        if self.proxy is None or not self.nome:
+            return
+        atual = bool(self._prop(self.proxy, "Shuffle"))
+        novo = not atual
+        self.bus.call(
+            self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Set",
+            GLib.Variant("(ssv)", (IFACE_PLAYER, "Shuffle", GLib.Variant("b", novo))),
+            None, Gio.DBusCallFlags.NONE, 300, None, None)
+
+    def alternar_loop(self) -> None:
+        if self.proxy is None or not self.nome:
+            return
+        atual = self._prop(self.proxy, "LoopStatus") or "None"
+        ordem = ["None", "Track", "Playlist"]
+        try:
+            idx = ordem.index(atual)
+            novo = ordem[(idx + 1) % len(ordem)]
+        except ValueError:
+            novo = "Track"
+        self.bus.call(
+            self.nome, CAMINHO_MPRIS, "org.freedesktop.DBus.Properties", "Set",
+            GLib.Variant("(ssv)", (IFACE_PLAYER, "LoopStatus", GLib.Variant("s", novo))),
+            None, Gio.DBusCallFlags.NONE, 300, None, None)
 
     def total_players(self) -> int:
         try:
@@ -505,12 +583,7 @@ class Mpris:
             prox_nome = nomes[0]
 
         self._fixado_manual = prox_nome
-        p = self._proxy(prox_nome)
-        if p is not None:
-            self.proxy, self.nome = p, prox_nome
-            p.connect("g-properties-changed", lambda *_: self.ao_mudar())
-            log(f"player alternado manualmente para: {prox_nome}")
-            self.ao_mudar()
+        self.escolher()
 
 
 # ---------------------------------------------------------------------------
@@ -1196,82 +1269,122 @@ class Hypr:
 # ---------------------------------------------------------------------------
 # Capa do álbum e Cor Dinâmica
 # ---------------------------------------------------------------------------
-def extrair_cor_dominante(caminho_arquivo: str) -> tuple[int, int, int]:
-    """Extrai a cor vibrante/dominante da capa (downscale para 16x16) em <2ms."""
+def escolher_cor(pixels: list[tuple[int, int, int]]) -> tuple[int, int, int] | None:
+    """Extrai a cor dominante vibrante por histograma de matiz com piso de luminosidade."""
+    bins = {}
+    for r, g, b in pixels:
+        h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+        if s < 0.25 or not (0.15 < l < 0.9):
+            continue
+        acc = bins.setdefault(int(h * 24) % 24, [0.0, 0.0, 0.0, 0.0])
+        peso = s * (1.0 - abs(2.0 * l - 1.0))
+        acc[0] += peso
+        acc[1] += r * peso
+        acc[2] += g * peso
+        acc[3] += b * peso
+    if not bins:
+        return None
+    peso, sr, sg, sb = max(bins.values(), key=lambda a: a[0])
+    if peso <= 0:
+        return None
+    h, l, s = colorsys.rgb_to_hls(sr / peso / 255.0, sg / peso / 255.0, sb / peso / 255.0)
+    l = min(0.78, max(0.58, l))
+    return tuple(int(c * 255.0) for c in colorsys.hls_to_rgb(h, l, max(s, 0.45)))
+
+
+def limpar_cache_antigo() -> None:
     try:
-        if not caminho_arquivo or not os.path.exists(caminho_arquivo):
-            return (203, 166, 247)
-        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho_arquivo, 16, 16, True)
-        if pb is None:
-            return (203, 166, 247)
-        pixels = pb.get_pixels()
-        n_ch = pb.get_n_channels()
-        rowstride = pb.get_rowstride()
-        w, h = pb.get_width(), pb.get_height()
-        best = None
-        max_score = -1.0
-        r_sum, g_sum, b_sum, tot = 0, 0, 0, 0
-        for y in range(h):
-            row = y * rowstride
-            for x in range(w):
-                idx = row + x * n_ch
-                r, g, b = pixels[idx], pixels[idx + 1], pixels[idx + 2]
-                r_sum += r; g_sum += g; b_sum += b; tot += 1
-                mx, mn = max(r, g, b), min(r, g, b)
-                sat = mx - mn
-                if 40 < mx < 240:
-                    score = sat * (1.0 + (mx / 255.0))
-                    if score > max_score:
-                        max_score = score
-                        best = (r, g, b)
-        if best and max_score > 35:
-            return best
-        if tot > 0:
-            return (r_sum // tot, g_sum // tot, b_sum // tot)
-        return (203, 166, 247)
-    except Exception as e:
-        log(f"Falha ao extrair cor dominante: {e}")
-        return (203, 166, 247)
+        if not os.path.exists(CACHE_ART):
+            return
+        arquivos = []
+        agora = time.time()
+        for f in os.scandir(CACHE_ART):
+            if f.is_file() and f.name.endswith(".img"):
+                st = f.stat()
+                arquivos.append((st.st_mtime, f.path))
+                if agora - st.st_mtime > 14 * 86400:
+                    try:
+                        os.unlink(f.path)
+                    except Exception:
+                        pass
+        if len(arquivos) > 300:
+            arquivos.sort(key=lambda x: x[0])
+            for _, path in arquivos[:len(arquivos) - 300]:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def carregar_art(uri: str, cb) -> None:
-    """Chama cb(Gdk.Texture|None, tuple[int,int,int]|None). file:// é síncrono; http baixa e cacheia."""
+    """Carrega textura e cor de forma 100% assíncrona, segura e sem travar a thread de UI."""
     if not uri:
         cb(None, None)
         return
-    if uri.startswith("file://"):
-        caminho = Gio.File.new_for_uri(uri).get_path()
-        try:
-            tex = Gdk.Texture.new_from_filename(caminho)
-            cor = extrair_cor_dominante(caminho)
-            cb(tex, cor)
-        except GLib.Error:
-            cb(None, None)
-        return
 
-    os.makedirs(CACHE_ART, exist_ok=True)
-    destino = os.path.join(CACHE_ART, hashlib.sha1(uri.encode()).hexdigest() + ".img")
-    if os.path.exists(destino):
+    def _worker():
+        caminho = None
         try:
-            tex = Gdk.Texture.new_from_filename(destino)
-            cor = extrair_cor_dominante(destino)
-            cb(tex, cor)
-            return
-        except GLib.Error:
-            pass
+            if uri.startswith("file://"):
+                caminho = urllib.parse.unquote(uri[7:])
+            elif uri.startswith("http://") or uri.startswith("https://"):
+                os.makedirs(CACHE_ART, exist_ok=True)
+                hash_nome = hashlib.sha1(uri.encode()).hexdigest() + ".img"
+                caminho = os.path.join(CACHE_ART, hash_nome)
+                if not os.path.exists(caminho):
+                    req = urllib.request.Request(uri, headers={"User-Agent": "hypr-dynamic-island/1.0"})
+                    with urllib.request.urlopen(req, timeout=4.5) as resp:
+                        dados = resp.read()
+                    temp_dest = caminho + f".tmp.{os.getpid()}"
+                    with open(temp_dest, "wb") as f:
+                        f.write(dados)
+                    os.replace(temp_dest, caminho)
+                    limpar_cache_antigo()
+            else:
+                caminho = uri
 
-    def baixou(fonte, res):
-        try:
-            ok, dados, _ = fonte.load_contents_finish(res)
-            with open(destino, "wb") as f:
-                f.write(dados)
-            tex = Gdk.Texture.new_from_filename(destino)
-            cor = extrair_cor_dominante(destino)
-            cb(tex, cor)
-        except GLib.Error:
-            cb(None, None)
+            if not caminho or not os.path.exists(caminho):
+                GLib.idle_add(lambda: cb(None, None))
+                return
 
-    Gio.File.new_for_uri(uri).load_contents_async(None, baixou)
+            # Decodificação assíncrona em tamanho otimizado (192px cobre hero 2x sem pesar)
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, 192, 192, True)
+            pb_tiny = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, 24, 24, True)
+
+            pixels_lista = []
+            if pb_tiny:
+                raw_pixels = pb_tiny.get_pixels()
+                n_ch = pb_tiny.get_n_channels()
+                rowstride = pb_tiny.get_rowstride()
+                w, h = pb_tiny.get_width(), pb_tiny.get_height()
+                for y in range(h):
+                    row = y * rowstride
+                    for x in range(w):
+                        idx = row + x * n_ch
+                        pixels_lista.append((raw_pixels[idx], raw_pixels[idx + 1], raw_pixels[idx + 2]))
+
+            cor = escolher_cor(pixels_lista) or (203, 166, 247)
+
+            def _aplicar():
+                if pb:
+                    try:
+                        tex = Gdk.Texture.new_for_pixbuf(pb)
+                        cb(tex, cor)
+                        return False
+                    except Exception:
+                        pass
+                cb(None, None)
+                return False
+
+            GLib.idle_add(_aplicar)
+
+        except Exception as e:
+            log(f"Falha ao carregar arte {uri}: {e}")
+            GLib.idle_add(lambda: cb(None, None))
+
+    threading.Thread(target=_worker, daemon=True).start()
 # ---------------------------------------------------------------------------
 # A ilha
 # ---------------------------------------------------------------------------
@@ -1466,7 +1579,7 @@ class Ilha:
         # Topo: Capa (52x52) + Coluna de Metadados (Título, Artista, Álbum/Badge)
         self.hero_capa = Gtk.Image()
         self.hero_capa.set_name("hero-capa")
-        self.hero_capa.set_pixel_size(60)
+        self.hero_capa.set_pixel_size(80)
         self.hero_capa.set_overflow(Gtk.Overflow.HIDDEN)
         self.hero_capa.set_cursor_from_name("pointer")
         self.hero_capa.set_tooltip_text("Clique: focar | Scroll: volume do player")
@@ -1543,7 +1656,14 @@ class Ilha:
         self.linha_progresso.append(self.barra)
         self.linha_progresso.append(self.tempo_total)
 
-        # Controles de Transporte com Play Circular Centralizado
+        # Controles de Transporte com Play Circular Centralizado, Shuffle e Repeat
+        self.b_shuffle = Gtk.Button()
+        self.b_shuffle.set_child(self._icone("media-playlist-shuffle-symbolic"))
+        self.b_shuffle.add_css_class("controle")
+        self.b_shuffle.add_css_class("hero-sub-btn")
+        self.b_shuffle.set_tooltip_text("Ordem Aleatória (Shuffle)")
+        self.b_shuffle.connect("clicked", lambda *_: self.mpris.alternar_shuffle())
+
         self.b_ant = self._botao("media-skip-backward-symbolic", "Previous")
         self.b_ant.set_tooltip_text("Faixa Anterior")
 
@@ -1554,11 +1674,20 @@ class Ilha:
         self.b_prox = self._botao("media-skip-forward-symbolic", "Next")
         self.b_prox.set_tooltip_text("Próxima Faixa")
 
-        self.controles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
+        self.b_repeat = Gtk.Button()
+        self.b_repeat.set_child(self._icone("media-playlist-repeat-symbolic"))
+        self.b_repeat.add_css_class("controle")
+        self.b_repeat.add_css_class("hero-sub-btn")
+        self.b_repeat.set_tooltip_text("Repetição (Repeat)")
+        self.b_repeat.connect("clicked", lambda *_: self.mpris.alternar_loop())
+
+        self.controles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         self.controles.set_halign(Gtk.Align.CENTER)
+        self.controles.append(self.b_shuffle)
         self.controles.append(self.b_ant)
         self.controles.append(self.b_play)
         self.controles.append(self.b_prox)
+        self.controles.append(self.b_repeat)
 
         # -- Página 1: Mídia (Now Playing) -----------------------------------
         # Estado com player ativo
@@ -2678,7 +2807,7 @@ class Ilha:
         d = mpris.dados() if mpris is not None else None
         self.relogio.set_text(time.strftime("%H:%M"))
 
-        tem = bool(d and d["titulo"])
+        tem = bool(d and (d.get("titulo") or d.get("art")))
         if tem != self._tem_player:
             self._tem_player = tem
             if self._pronto:
@@ -2691,15 +2820,13 @@ class Ilha:
         if not tem:
             self._status = "Stopped"
             self._capa_ok = False
+            self._art_uri = "\0"  # Correção Bug 1: permite recarregar a mesma arte quando o player voltar
+            self._ultimo_estado_mpris = None
             self.pilula.remove_css_class("tocando")
             if hasattr(self, "hero_card"):
                 self.hero_card.remove_css_class("tocando")
             self._aplicar_cor_dinamica(None)
-            # a data não fica mais na pílula: sem mídia o cabeçalho são os
-            # pontos das áreas de trabalho, e a data vai para o painel
-            if self._eq_timer:
-                GLib.source_remove(self._eq_timer)
-                self._eq_timer = 0
+            self._sincronizar_eq()
             if hasattr(self, "hero_capa"):
                 self.hero_capa.set_from_icon_name("audio-x-generic-symbolic")
             if hasattr(self, "hero_titulo"):
@@ -2712,13 +2839,17 @@ class Ilha:
             if hasattr(self, "tempo_total"):
                 self.tempo_total.set_text("0:00")
             self.barra.set_fraction(0)
-            self.b_play.remove_css_class("spotify")
-            self.barra.remove_css_class("spotify")
             self.b_play.remove_css_class("dinamico")
             self.barra.remove_css_class("dinamico")
             self.eq_lbl.remove_css_class("dinamico")
             for b in (self.b_ant, self.b_play, self.b_prox):
                 b.set_sensitive(False)
+            if hasattr(self, "b_shuffle"):
+                self.b_shuffle.set_sensitive(False)
+                self.b_shuffle.remove_css_class("ativo")
+            if hasattr(self, "b_repeat"):
+                self.b_repeat.set_sensitive(False)
+                self.b_repeat.remove_css_class("ativo")
             if hasattr(self, "hero_media_active_box"):
                 self.hero_media_active_box.set_visible(False)
             if hasattr(self, "hero_media_empty_box"):
@@ -2726,97 +2857,147 @@ class Ilha:
             self._render_cabecalho()
             return
 
+        # Estado chave para evitar retrabalho visual quando nada relevante mudou (Bug 11)
+        estado_chave = (
+            d.get("player"),
+            d.get("status"),
+            d.get("titulo"),
+            d.get("artista"),
+            d.get("album"),
+            d.get("art"),
+            d.get("duracao"),
+            d.get("pode_ant"),
+            d.get("pode_prox"),
+            d.get("pode_play"),
+            d.get("pode_seek"),
+            d.get("shuffle"),
+            d.get("loop"),
+        )
+        if estado_chave == getattr(self, "_ultimo_estado_mpris", None):
+            return
+        self._ultimo_estado_mpris = estado_chave
+
         if hasattr(self, "hero_media_active_box"):
             self.hero_media_active_box.set_visible(True)
         if hasattr(self, "hero_media_empty_box"):
             self.hero_media_empty_box.set_visible(False)
 
+        titulo_ant = getattr(self, "_faixa_anterior_titulo", None)
+        novo_titulo = d.get("titulo", "")
         self._status = d.get("status", "Stopped")
-        self.titulo.set_text(d["titulo"])
+        self.titulo.set_text(novo_titulo)
         if hasattr(self, "hero_titulo"):
-            self.hero_titulo.set_text(d["titulo"])
-        self.artista.set_text(d["artista"] or d["titulo"])
+            self.hero_titulo.set_text(novo_titulo)
+        self.artista.set_text(d.get("artista") or novo_titulo)
+
+        # Transição na troca de faixa: pulso suave na pílula colapsada (Bug 16)
+        tocando = (self._status == "Playing")
+        if titulo_ant is not None and novo_titulo != titulo_ant and tocando and not self._expandido:
+            self._pulsar_troca_faixa()
+        self._faixa_anterior_titulo = novo_titulo
 
         album = d.get("album", "")
         player = (d.get("player", "") or "").lower()
-        ident = self.mpris.identidade(d.get("titulo", "")) if self.mpris else ""
+        ident = self.mpris.identidade(novo_titulo) if self.mpris else ""
         if hasattr(self, "hero_album"):
             if "spotify" in player:
-                if album:
-                    self.hero_album.set_markup(f"<span foreground='#a6e3a1'>󰓇</span>  {GLib.markup_escape_text(album)}")
-                else:
-                    self.hero_album.set_markup("<span foreground='#a6e3a1'>󰓇</span>  Spotify")
+                icone_player = "󰓇"
+            elif "kdeconnect" in player:
+                icone_player = "󰄜"
+            elif any(b in player for b in ("firefox", "chrome", "chromium", "brave", "zen")):
+                icone_player = "󰈹"
             else:
-                # Ícone e cor contextual por reprodutor / dispositivo
-                if "kdeconnect" in player or any(k in ident.lower() for k in ("galaxy", "phone", "celular", "android")):
-                    icone_player = "󰄜"
-                    cor_player = "#89b4fa"
-                elif any(b in player for b in ("firefox", "chrome", "chromium", "brave", "zen")):
-                    icone_player = "󰈹"
-                    cor_player = "#fab387"
-                else:
-                    icone_player = "󰎆"
-                    cor_player = "#cba6f7"
+                icone_player = "󰎆"
 
-                subtexto = album or ident
-                if not subtexto and player:
-                    subtexto = player.split(".")[-1].capitalize()
+            subtexto = album or ident or player.split(".")[-1].capitalize()
+            if subtexto:
+                self.hero_album.set_markup(f"<span>{icone_player}</span>  {GLib.markup_escape_text(subtexto)}")
+            else:
+                self.hero_album.set_text("")
 
-                if subtexto:
-                    self.hero_album.set_markup(f"<span foreground='{cor_player}'>{icone_player}</span>  {GLib.markup_escape_text(subtexto)}")
-                else:
-                    self.hero_album.set_text("")
+        # Todos os players utilizam cores dinâmicas sem forçar estilos fixos (Bug 9 e 17)
+        self.b_play.remove_css_class("spotify")
+        self.barra.remove_css_class("spotify")
+        self.b_play.add_css_class("dinamico")
+        self.barra.add_css_class("dinamico")
+        self.eq_lbl.add_css_class("dinamico")
 
-        if "spotify" in player:
-            self.b_play.add_css_class("spotify")
-            self.barra.add_css_class("spotify")
-            self.b_play.remove_css_class("dinamico")
-            self.barra.remove_css_class("dinamico")
-            self.eq_lbl.remove_css_class("dinamico")
+        # Tratamento de duração e faixa ao vivo (Bug 5)
+        duracao = d.get("duracao", 0)
+        pode_seek = bool(d.get("pode_seek", False) and duracao > 0)
+        if duracao > 0:
+            if hasattr(self, "tempo_total"):
+                self.tempo_total.set_text(mmss(duracao))
+            self.barra.set_cursor_from_name("pointer" if pode_seek else "default")
+            self.barra.set_sensitive(pode_seek)
         else:
-            self.b_play.remove_css_class("spotify")
-            self.barra.remove_css_class("spotify")
-            self.b_play.add_css_class("dinamico")
-            self.barra.add_css_class("dinamico")
-            self.eq_lbl.add_css_class("dinamico")
+            if hasattr(self, "tempo_total"):
+                self.tempo_total.set_text("Ao vivo")
+            if hasattr(self, "tempo_atual"):
+                pos = self.mpris.posicao_estimada() if self.mpris else 0
+                self.tempo_atual.set_text(mmss(pos) if pos > 0 else "")
+            self.barra.set_fraction(0.0)
+            self.barra.set_cursor_from_name("default")
+            self.barra.set_sensitive(False)
 
-        if hasattr(self, "tempo_total") and d["duracao"] > 0:
-            self.tempo_total.set_text(mmss(d["duracao"]))
-
-        tocando = d["status"] == "Playing"
+        # Ícone e estado de reprodução
         ico_play = "media-playback-pause-symbolic" if tocando else "media-playback-start-symbolic"
         if getattr(self, "_play_icone_nome", None) != ico_play:
             self._play_icone_nome = ico_play
             self.b_play.set_child(self._icone(ico_play))
-        self.b_ant.set_sensitive(d["pode_ant"])
-        self.b_prox.set_sensitive(d["pode_prox"])
-        self.b_play.set_sensitive(True)
+
+        self.b_ant.set_sensitive(d.get("pode_ant", False))
+        self.b_prox.set_sensitive(d.get("pode_prox", False))
+        self.b_play.set_sensitive(d.get("pode_play", True))
+
+        # Shuffle e Repeat (Bug 14)
+        if hasattr(self, "b_shuffle"):
+            self.b_shuffle.set_sensitive(self.mpris is not None and self.mpris.proxy is not None)
+            if d.get("shuffle", False):
+                self.b_shuffle.add_css_class("ativo")
+            else:
+                self.b_shuffle.remove_css_class("ativo")
+
+        if hasattr(self, "b_repeat"):
+            self.b_repeat.set_sensitive(self.mpris is not None and self.mpris.proxy is not None)
+            loop_st = d.get("loop", "None")
+            if loop_st != "None":
+                self.b_repeat.add_css_class("ativo")
+                if loop_st == "Track":
+                    self.b_repeat.set_tooltip_text("Repetição: Faixa atual")
+                else:
+                    self.b_repeat.set_tooltip_text("Repetição: Lista/Playlist")
+            else:
+                self.b_repeat.remove_css_class("ativo")
+                self.b_repeat.set_tooltip_text("Repetição desativada")
 
         if tocando:
             self.pilula.add_css_class("tocando")
             if hasattr(self, "hero_card"):
                 self.hero_card.add_css_class("tocando")
-            if not self._eq_timer:
-                self._eq_timer = GLib.timeout_add(140, self._tick_eq)
         else:
             self.pilula.remove_css_class("tocando")
             if hasattr(self, "hero_card"):
                 self.hero_card.remove_css_class("tocando")
-            if self._eq_timer:
-                GLib.source_remove(self._eq_timer)
-                self._eq_timer = 0
-            if d["status"] == "Paused":
+            if d.get("status") == "Paused":
                 self.eq_lbl.set_text(" ▂ ")
 
+        self._sincronizar_eq()
         self._render_cabecalho()
 
-        if d["art"] != self._art_uri:
-            self._art_uri = d["art"]
-            carregar_art(d["art"], self._pintar_capa)
+        # Carregamento seguro de arte com proteção contra corrida (Bug 2)
+        art_alvo = d.get("art", "")
+        if art_alvo != self._art_uri:
+            self._art_uri = art_alvo
+            carregar_art(art_alvo, lambda tex, cor, u=art_alvo:
+                         self._art_uri == u and self._pintar_capa(tex, cor, u))
 
-    def _pintar_capa(self, textura, cor=None) -> None:
+    def _pintar_capa(self, textura, cor=None, uri_esperada: str = "") -> None:
+        if uri_esperada and uri_esperada != self._art_uri:
+            return
         if textura is None:
             self._capa_ok = False
+            self._art_uri = "\0"  # Permite repetir o download se falhar temporariamente (Bug 2)
             self.capa.set_visible(False)
             if hasattr(self, "hero_capa"):
                 self.hero_capa.set_from_icon_name("audio-x-generic-symbolic")
@@ -2829,15 +3010,57 @@ class Ilha:
             self._aplicar_cor_dinamica(cor)
         self._render_cabecalho()
 
+    def _sincronizar_eq(self) -> None:
+        deve = (self._tem_player and getattr(self, "_status", "") == "Playing"
+                and not getattr(self, "_mudo", False)
+                and not getattr(self, "_hud_ativo", False)
+                and not getattr(self, "_notif_ativa", False)
+                and not getattr(self, "_fullscreen", False))
+        if deve and not self._eq_timer:
+            self._eq_timer = GLib.timeout_add(140, self._tick_eq)
+        elif not deve and self._eq_timer:
+            GLib.source_remove(self._eq_timer)
+            self._eq_timer = 0
+            if getattr(self, "_status", None) == "Paused":
+                self.eq_lbl.set_text(" ▂ ")
+            elif getattr(self, "_mudo", False):
+                self.eq_lbl.set_text("───")
+
+    def _pulsar_troca_faixa(self) -> None:
+        if self._expandido or getattr(self, "_hud_ativo", False) or getattr(self, "_notif_ativa", False):
+            return
+        largura_normal = self._largura_alvo(False)
+        largura_pulso = min(LARGURA, largura_normal + 36)
+        self._animar_tamanho(largura_pulso, self._altura_alvo(False), ms=180)
+        if getattr(self, "_faixa_pulso_timer", 0):
+            GLib.source_remove(self._faixa_pulso_timer)
+        self._faixa_pulso_timer = GLib.timeout_add(2200, self._terminar_pulso_faixa)
+
+    def _terminar_pulso_faixa(self) -> bool:
+        self._faixa_pulso_timer = 0
+        if not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False):
+            self._animar_tamanho(self._largura_alvo(False), self._altura_alvo(False), ms=240)
+        return False
+
     def _ao_clicar_focar_player(self) -> None:
         d = self.mpris.dados() if self.mpris else None
         player = (d.get("player", "") if d else "").lower()
         log(f"Focando reprodutor: {player}")
-        if "spotify" in player:
+        de = self.mpris.desktop_entry() if self.mpris else ""
+        if "spotify" in player or de.lower() == "spotify":
             subprocess.Popen(["hyprctl", "dispatch", "focuswindow", "class:Spotify"],
+                             env=self.hypr._ambiente)
+        elif de:
+            subprocess.Popen(["hyprctl", "dispatch", "focuswindow", f"class:(?i){de}"],
                              env=self.hypr._ambiente)
         elif player:
             cmd = player.split(".")[-1]
+            if cmd.startswith("instance"):
+                parts = player.split(".")
+                for p in reversed(parts):
+                    if not p.startswith("instance") and p not in ("MediaPlayer2", "org", "mpris"):
+                        cmd = p
+                        break
             subprocess.Popen(["hyprctl", "dispatch", "focuswindow", f"class:(?i){cmd}"],
                              env=self.hypr._ambiente)
 
@@ -2846,7 +3069,39 @@ class Ilha:
             return False
         log(f"Scroll no player: dy={dy}")
         delta = -0.05 if dy > 0 else 0.05
-        self.mpris.ajustar_volume(delta)
+        novo_vol = self.mpris.ajustar_volume(delta)
+        if novo_vol is not None:
+            self._mostrar_hud_player_volume(novo_vol)
+        return True
+
+    def _mostrar_hud_player_volume(self, vol: float) -> None:
+        if not self._pronto or self._expandido:
+            return
+        if getattr(self, "_notif_timer", 0):
+            GLib.source_remove(self._notif_timer)
+            self._notif_timer = 0
+            self.notif_box.set_visible(False)
+            self._notif_ativa = False
+
+        self._hud_ativo = True
+        self._render_cabecalho()
+
+        pct = int(round(vol * 100))
+        self.hud_icone.remove_css_class("mudo")
+        if pct == 0:
+            self.hud_icone.set_text("󰝟")
+        elif pct < 50:
+            self.hud_icone.set_text("󰕿")
+        else:
+            self.hud_icone.set_text("󰕾")
+
+        self.hud_pct.set_text(f"{pct}%")
+        self.hud_barra.set_fraction(min(1.0, max(0.0, vol)))
+        self._animar_tamanho(260, self._altura_alvo(False), ms=150)
+
+        if self._hud_timer:
+            GLib.source_remove(self._hud_timer)
+        self._hud_timer = GLib.timeout_add(1500, self._esconder_hud_volume)
         return True
 
     def _ao_scroll_sessoes(self, _ctrl, _dx: float, dy: float) -> bool:
@@ -2994,35 +3249,43 @@ class Ilha:
                          env=self.hypr._ambiente)
 
     def _ao_drag_barra_inicio(self, _gesture, start_x: float, _start_y: float) -> None:
+        d = self.mpris.dados() if self.mpris else None
+        if not (d and d.get("pode_seek", False) and d.get("duracao", 0) > 0):
+            return
         self._arrastando_barra = True
         self._atualizar_seek(start_x, commit=False)
 
     def _ao_drag_barra_atualizar(self, gesture, offset_x: float, _offset_y: float) -> None:
+        if not getattr(self, "_arrastando_barra", False):
+            return
         ok, x0, _ = gesture.get_start_point()
         if ok:
             self._atualizar_seek(x0 + offset_x, commit=False)
 
     def _ao_drag_barra_fim(self, gesture, offset_x: float, _offset_y: float) -> None:
+        if not getattr(self, "_arrastando_barra", False):
+            return
         ok, x0, _ = gesture.get_start_point()
         if ok:
             self._atualizar_seek(x0 + offset_x, commit=True)
         self._arrastando_barra = False
 
     def _atualizar_seek(self, x: float, commit: bool = False) -> None:
+        d = self.mpris.dados() if self.mpris else None
+        if not (d and d.get("pode_seek", False) and d.get("duracao", 0) > 0):
+            return
         largura = self.barra.get_width()
         if largura <= 0:
             return
         fracao = max(0.0, min(1.0, x / largura))
         self.barra.set_fraction(fracao)
-        d = self.mpris.dados()
-        if d and d["duracao"] > 0:
-            alvo_us = int(fracao * d["duracao"])
-            if hasattr(self, "tempo_atual"):
-                self.tempo_atual.set_text(mmss(alvo_us))
-            if hasattr(self, "tempo_total"):
-                self.tempo_total.set_text(mmss(d["duracao"]))
-            if commit:
-                self.mpris.seek(alvo_us)
+        alvo_us = int(fracao * d["duracao"])
+        if hasattr(self, "tempo_atual"):
+            self.tempo_atual.set_text(mmss(alvo_us))
+        if hasattr(self, "tempo_total"):
+            self.tempo_total.set_text(mmss(d["duracao"]))
+        if commit:
+            self.mpris.seek(alvo_us)
 
     def _ao_scroll(self, ctrl, _dx: float, dy: float) -> bool:
         if self._expandido:
@@ -3157,24 +3420,35 @@ class Ilha:
             return True
 
         d = self.mpris.dados()
-        if d and d["status"] != "Stopped" and d["duracao"] > 0:
-            agora = time.monotonic()
-            resync_int = float(CONFIG["mpris"].get("resync_intervalo_s", 5.0))
-            if d["status"] == "Playing" and (agora - getattr(self.mpris, "_ultimo_sync_d_bus", 0.0) > resync_int):
-                self.mpris.sincronizar_posicao()
-
+        if d and d["status"] != "Stopped":
             pos = self.mpris.posicao_estimada()
-            if getattr(self, "_arrastando_barra", False):
-                return True
-            frac = min(1.0, max(0.0, pos / d["duracao"]))
-            if hasattr(self, "pilula_progresso") and self.pilula_progresso.get_visible():
-                self.pilula_progresso.set_fraction(frac)
-            if self._expandido:
-                self.barra.set_fraction(frac)
-                if hasattr(self, "tempo_atual"):
-                    self.tempo_atual.set_text(mmss(pos))
-                if hasattr(self, "tempo_total"):
-                    self.tempo_total.set_text(mmss(d["duracao"]))
+            if d["duracao"] > 0:
+                agora = time.monotonic()
+                resync_int = float(CONFIG["mpris"].get("resync_intervalo_s", 5.0))
+                if d["status"] == "Playing" and (agora - getattr(self.mpris, "_ultimo_sync_d_bus", 0.0) > resync_int):
+                    self.mpris.sincronizar_posicao()
+
+                if getattr(self, "_arrastando_barra", False):
+                    return True
+                frac = min(1.0, max(0.0, pos / d["duracao"]))
+                if hasattr(self, "pilula_progresso") and self.pilula_progresso.get_visible():
+                    self.pilula_progresso.set_fraction(frac)
+                if self._expandido:
+                    self.barra.set_fraction(frac)
+                    if hasattr(self, "tempo_atual"):
+                        self.tempo_atual.set_text(mmss(pos))
+                    if hasattr(self, "tempo_total"):
+                        self.tempo_total.set_text(mmss(d["duracao"]))
+            else:
+                # Transmissão ao vivo / sem duração conhecida (Bug 5)
+                if hasattr(self, "pilula_progresso") and self.pilula_progresso.get_visible():
+                    self.pilula_progresso.set_fraction(0.0)
+                if self._expandido:
+                    self.barra.set_fraction(0.0)
+                    if hasattr(self, "tempo_atual"):
+                        self.tempo_atual.set_text(mmss(pos) if pos > 0 else "")
+                    if hasattr(self, "tempo_total"):
+                        self.tempo_total.set_text("Ao vivo")
         return True
 
     def _tick_sistema(self) -> bool:
@@ -3375,8 +3649,10 @@ class Ilha:
         if not self._tem_player or getattr(self, "_hud_ativo", False) or getattr(self, "_notif_ativa", False):
             self._eq_timer = 0
             return False
-        if getattr(self, "_fullscreen", False):
+        if getattr(self, "_fullscreen", False) or getattr(self, "_mudo", False):
             self._eq_timer = 0
+            if getattr(self, "_mudo", False):
+                self.eq_lbl.set_text("───")
             return False
         st = getattr(self.mpris, "_status", None)
         if st is None and self.mpris:
@@ -3384,6 +3660,8 @@ class Ilha:
             st = d.get("status") if d else None
         if st != "Playing":
             self._eq_timer = 0
+            if st == "Paused":
+                self.eq_lbl.set_text(" ▂ ")
             return False
         self._eq_idx = (self._eq_idx + 1) % len(EQ_FRAMES)
         self.eq_lbl.set_text(EQ_FRAMES[self._eq_idx])
@@ -3432,6 +3710,7 @@ class Ilha:
         self._render_cabecalho()
         if not self._expandido:
             self._aplicar_conteudo()
+        self._sincronizar_eq()
         return False
 
     # -- Manipulação e Interação de Notificações ----------------------------
@@ -3600,6 +3879,7 @@ class Ilha:
                 self._mudar_pagina(inicial)
             self._aplicar_conteudo()
             self._animar_tamanho(self._largura_alvo(True), self._altura_alvo(True))
+        self._sincronizar_eq()
         return False
 
     def _proxy_dunst(self):
@@ -3756,6 +4036,7 @@ class Ilha:
             self._mostrar_sistema()
         if self._pronto and (ant_vol != self._vol or ant_mudo != self._mudo):
             self._mostrar_hud_volume()
+        self._sincronizar_eq()
 
     def _mostrar_sistema(self) -> None:
         """Atualiza as barras e valores de CPU, RAM, Volume, Saída de Áudio e Quick Toggles."""

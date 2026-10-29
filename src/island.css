@@ -31,6 +31,7 @@ window { background: transparent; }
   min-height: 2px;
   border-radius: 1px;
   background-color: #cba6f7;
+  transition: background-color 240ms ease;
 }
 
 #cabecalho { min-height: 24px; padding: 0 2px; }
@@ -284,11 +285,11 @@ window { background: transparent; }
 
 /* Card de Mídia Refinado (Now Playing) */
 #hero-capa {
-  border-radius: 8px;
+  border-radius: 12px;
   background-color: #11111b;
-  min-width: 60px;
-  min-height: 60px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  min-width: 80px;
+  min-height: 80px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
 #hero-titulo {
   color: #cdd6f4;
@@ -331,13 +332,10 @@ progressbar > trough > progress {
   min-height: 4px;
   border-radius: 2px;
   background-color: #cba6f7;
-  transition: min-height 120ms ease;
+  transition: min-height 120ms ease, background-color 240ms ease;
 }
 progressbar:hover > trough > progress {
   min-height: 6px;
-}
-progressbar.spotify > trough > progress {
-  background-color: #a6e3a1;
 }
 
 button.controle {
@@ -348,10 +346,28 @@ button.controle {
   min-width: 24px;
   min-height: 24px;
   color: #cdd6f4;
+  transition: all 140ms ease;
 }
 button.controle:hover { background-color: #313244; border-radius: 12px; }
 button.controle:active { background-color: #45475a; border-radius: 12px; }
 button.controle:disabled { color: #45475a; }
+
+button.controle.hero-sub-btn {
+  padding: 4px;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 10px;
+  color: #6c7086;
+  transition: all 140ms ease;
+}
+button.controle.hero-sub-btn:hover {
+  color: #cdd6f4;
+  background-color: #313244;
+}
+button.controle.hero-sub-btn.ativo {
+  color: #cba6f7;
+  background-color: rgba(203, 166, 247, 0.15);
+}
 
 button.controle.play-btn {
   background-color: #313244;
@@ -360,17 +376,10 @@ button.controle.play-btn {
   padding: 4px;
   min-width: 36px;
   min-height: 36px;
-  transition: all 140ms ease;
+  transition: all 140ms ease, background-color 240ms ease, color 240ms ease;
 }
 button.controle.play-btn:hover {
   background-color: #45475a;
-}
-button.controle.play-btn.spotify {
-  background-color: #a6e3a1;
-  color: #11111b;
-}
-button.controle.play-btn.spotify:hover {
-  background-color: #94e2d5;
 }
 
 /* Chips de Métricas do Sistema táteis */
