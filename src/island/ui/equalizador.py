@@ -11,13 +11,14 @@ from gi.repository import Gtk, GLib
 import cairo
 
 from ..core.mola import Mola
+from ..fontes.espectro import CapturadorEspectro
 
 
 class EqualizadorArea(Gtk.DrawingArea):
     """Visualizador de equalizador de áudio vetorial (Cairo) com 4 barras arredondadas fluidas.
 
-    Cada barra tem sua própria mola física independente (resposta ~0.18s, amortecimento ~0.72)
-    que reage a pulsos orgânicos simulando a dinâmica da música a 144Hz.
+    Sincronizado em tempo real com o espectro de áudio do PipeWire através de 4 molas
+    físicas independentes (resposta ~0.12s-0.14s, amortecimento ~0.70) a 144Hz.
     """
 
     def __init__(self) -> None:
@@ -27,12 +28,12 @@ class EqualizadorArea(Gtk.DrawingArea):
         self.set_valign(Gtk.Align.CENTER)
         self.set_halign(Gtk.Align.CENTER)
 
-        # 4 barras com molas físicas independentes
+        # 4 barras com molas físicas independentes rápidas e elásticas
         self._molas = [
-            Mola(0.20, resposta=0.18, amortecimento=0.72),
-            Mola(0.20, resposta=0.16, amortecimento=0.70),
-            Mola(0.20, resposta=0.19, amortecimento=0.75),
-            Mola(0.20, resposta=0.17, amortecimento=0.72),
+            Mola(0.20, resposta=0.12, amortecimento=0.70),
+            Mola(0.20, resposta=0.13, amortecimento=0.72),
+            Mola(0.20, resposta=0.14, amortecimento=0.72),
+            Mola(0.20, resposta=0.12, amortecimento=0.68),
         ]
         self._alvos_tempo = 0.0
         self._cor_rgb = (0.796, 0.651, 0.969)  # Mauve Catppuccin padrão (203, 166, 247)
@@ -41,6 +42,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._mudo = False
         self._tick_id = 0
         self._ult_t = None
+        self._capturador = CapturadorEspectro()
 
         self.set_draw_func(self._desenhar)
 
@@ -56,6 +58,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._mudo = mudo
 
         if ativo and not pausado and not mudo:
+            self._capturador.iniciar()
             if not self._tick_id:
                 self._ult_t = None
                 try:
@@ -63,6 +66,7 @@ class EqualizadorArea(Gtk.DrawingArea):
                 except Exception:
                     self._tick_id = 0
         else:
+            self._capturador.parar()
             # Em pausa ou mudo: direciona suavemente as barras para repouso
             alvo = 0.20 if pausado else (0.10 if mudo else 0.0)
             for m in self._molas:
@@ -74,28 +78,42 @@ class EqualizadorArea(Gtk.DrawingArea):
                 except Exception:
                     self._tick_id = 0
 
+    def atualizar_sink(self) -> None:
+        """Notifica o capturador caso o dispositivo de saída tenha mudado."""
+        if hasattr(self, "_capturador"):
+            sink_novo = self._capturador._obter_sink_monitor()
+            if sink_novo and sink_novo != self._capturador._sink_atual and self._ativo:
+                self._capturador.parar()
+                self._capturador.iniciar(sink_novo)
+
     def _passo(self, _widget, clock) -> bool:
         t = (clock.get_frame_time() / 1e6) if clock is not None else time.monotonic()
         dt = 0.0 if self._ult_t is None else t - self._ult_t
         self._ult_t = t
         dt = min(dt, 1.0 / 30.0)
 
-        # Se tocando, gera metas de altura dinâmicas a cada ~110 ms
+        # Se tocando, alimenta as molas com as bandas reais do espectro de áudio
         if self._ativo and not self._pausado and not self._mudo:
-            if t - self._alvos_tempo > 0.11:
-                self._alvos_tempo = t
-                padroes = [
-                    (0.85, 0.45, 0.95, 0.60),
-                    (0.40, 0.90, 0.55, 0.85),
-                    (0.70, 0.35, 0.80, 0.50),
-                    (0.95, 0.75, 0.40, 0.90),
-                    (0.50, 0.85, 0.70, 0.35),
-                ]
-                idx = int((t * 9) % len(padroes))
-                base = padroes[idx]
+            bandas = self._capturador.obter_bandas()
+            if self._capturador.ativo_com_som:
                 for i, m in enumerate(self._molas):
-                    jitter = random.uniform(-0.08, 0.08)
-                    m.ir_para(max(0.18, min(1.0, base[i] + jitter)))
+                    m.ir_para(bandas[i])
+            else:
+                # Fallback suave ou silêncio na música
+                if t - self._alvos_tempo > 0.11:
+                    self._alvos_tempo = t
+                    padroes = [
+                        (0.85, 0.45, 0.95, 0.60),
+                        (0.40, 0.90, 0.55, 0.85),
+                        (0.70, 0.35, 0.80, 0.50),
+                        (0.95, 0.75, 0.40, 0.90),
+                        (0.50, 0.85, 0.70, 0.35),
+                    ]
+                    idx = int((t * 9) % len(padroes))
+                    base = padroes[idx]
+                    for i, m in enumerate(self._molas):
+                        jitter = random.uniform(-0.06, 0.06)
+                        m.ir_para(max(0.18, min(1.0, base[i] + jitter)))
 
         todas_assentadas = True
         for m in self._molas:

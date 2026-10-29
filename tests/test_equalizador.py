@@ -31,18 +31,32 @@ class TestEqualizadorEAnel(unittest.TestCase):
         eq.definir_estado(ativo=True, pausado=False, mudo=False)
         self.assertTrue(eq._ativo)
         self.assertFalse(eq._pausado)
+        self.assertTrue(eq._capturador._rodando)
 
-        # Pausa o EQ
+        # Pausa o EQ (deve parar capturador de áudio)
         eq.definir_estado(ativo=True, pausado=True, mudo=False)
         self.assertTrue(eq._pausado)
+        self.assertFalse(eq._capturador._rodando)
         for m in eq._molas:
             self.assertEqual(m.alvo, 0.20)
 
-        # Mudo
+        # Mudo (deve parar capturador de áudio)
         eq.definir_estado(ativo=True, pausado=False, mudo=True)
         self.assertTrue(eq._mudo)
+        self.assertFalse(eq._capturador._rodando)
         for m in eq._molas:
             self.assertEqual(m.alvo, 0.10)
+
+        # Desativa o EQ completamente
+        eq.definir_estado(ativo=False)
+        self.assertFalse(eq._ativo)
+        self.assertFalse(eq._capturador._rodando)
+
+    def test_equalizador_atualizar_sink(self):
+        eq = EqualizadorArea()
+        # Não deve falhar quando chamado
+        eq.atualizar_sink()
+        self.assertTrue(hasattr(eq, "_capturador"))
 
     def test_anel_progresso(self):
         anel = AnelProgresso(raio=7.0, largura_linha=2.0)

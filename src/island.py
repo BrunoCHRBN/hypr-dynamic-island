@@ -49,6 +49,7 @@ import os
 import random
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -181,11 +182,182 @@ class Mola:
         return False
 
 
+class CapturadorEspectro:
+    """Captura o stream de áudio do monitor do PipeWire e calcula magnitudes de 4 bandas espectrais."""
+
+    def __init__(self, taxa: int = 8000, n_amostras: int = 256) -> None:
+        self.taxa = taxa
+        self.n = n_amostras
+        self._proc: Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+        self._rodando = False
+        self._bandas: tuple[float, float, float, float] = (0.16, 0.16, 0.16, 0.16)
+        self._lock = threading.Lock()
+        self._peak_tracker = 0.20
+        self._ativo_com_som = False
+        self._sink_atual: Optional[str] = None
+
+        self._window = [0.5 - 0.5 * math.cos(2.0 * math.pi * i / (self.n - 1)) for i in range(self.n)]
+        bits = int(math.log2(self.n))
+        self._rev = [0] * self.n
+        for i in range(self.n):
+            r = 0
+            for j in range(bits):
+                if (i >> j) & 1:
+                    r |= 1 << (bits - 1 - j)
+            self._rev[i] = r
+
+        self._twiddles = {}
+        step = 2
+        while step <= self.n:
+            half = step // 2
+            self._twiddles[step] = [
+                math.e ** (-2j * math.pi * k / step) for k in range(half)
+            ]
+            step <<= 1
+
+    def _fft(self, x: list[float]) -> list[complex]:
+        n = self.n
+        a = [x[self._rev[i]] for i in range(n)]
+        step = 2
+        while step <= n:
+            half = step // 2
+            tw = self._twiddles[step]
+            for group in range(0, n, step):
+                for k in range(half):
+                    u = a[group + k]
+                    v = a[group + k + half] * tw[k]
+                    a[group + k] = u + v
+                    a[group + k + half] = u - v
+            step <<= 1
+        return a
+
+    def _obter_sink_monitor(self) -> Optional[str]:
+        try:
+            res = subprocess.run(
+                ["pactl", "get-default-sink"],
+                capture_output=True, text=True, timeout=0.3
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return f"{res.stdout.strip()}.monitor"
+        except Exception:
+            pass
+        return None
+
+    def iniciar(self, sink_monitor: Optional[str] = None) -> None:
+        if self._rodando:
+            return
+        target = sink_monitor or self._obter_sink_monitor()
+        if not target:
+            return
+
+        self._sink_atual = target
+        self._rodando = True
+        self._thread = threading.Thread(target=self._loop_captura, args=(target,), daemon=True)
+        self._thread.start()
+
+    def _loop_captura(self, target: str) -> None:
+        cmd = [
+            "pw-record",
+            "--rate", str(self.taxa),
+            "--channels", "1",
+            "--format", "s16",
+            "--latency", "32ms",
+            "--target", target,
+            "-",
+        ]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except Exception:
+            self._rodando = False
+            return
+
+        chunk_bytes = self.n * 2
+        while self._rodando and self._proc and self._proc.stdout:
+            try:
+                raw = self._proc.stdout.read(chunk_bytes)
+                if not raw or len(raw) < chunk_bytes:
+                    break
+
+                samples = struct.unpack(f"<{self.n}h", raw)
+                sum_sq = sum(s * s for s in samples)
+                rms = math.sqrt(sum_sq / self.n) / 32768.0
+
+                if rms < 0.0025:
+                    with self._lock:
+                        self._bandas = (0.16, 0.16, 0.16, 0.16)
+                        self._ativo_com_som = False
+                    continue
+
+                windowed = [samples[i] * self._window[i] for i in range(self.n)]
+                spec = self._fft(windowed)
+                mags = [abs(spec[k]) / (self.n * 16384.0) for k in range(self.n // 2)]
+
+                b0 = math.sqrt(sum(m * m for m in mags[2:8]) / 6.0) * 1.6
+                b1 = math.sqrt(sum(m * m for m in mags[8:23]) / 15.0) * 2.4
+                b2 = math.sqrt(sum(m * m for m in mags[23:56]) / 33.0) * 3.8
+                b3 = math.sqrt(sum(m * m for m in mags[56:116]) / 60.0) * 5.5
+
+                raw_max = max(b0, b1, b2, b3, 0.05)
+                self._peak_tracker = max(self._peak_tracker * 0.985, raw_max, 0.08)
+
+                def _norm(v: float) -> float:
+                    ratio = min(1.0, max(0.0, v / self._peak_tracker))
+                    return 0.16 + 0.84 * math.pow(ratio, 0.72)
+
+                v0 = _norm(b0)
+                v1 = _norm(b1)
+                v2 = _norm(b2)
+                v3 = _norm(b3)
+
+                with self._lock:
+                    self._bandas = (v0, v1, v2, v3)
+                    self._ativo_com_som = True
+            except Exception:
+                break
+
+        self._encerrar_proc()
+
+    def parar(self) -> None:
+        self._rodando = False
+        self._encerrar_proc()
+        with self._lock:
+            self._bandas = (0.0, 0.0, 0.0, 0.0)
+            self._ativo_com_som = False
+
+    def _encerrar_proc(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+                proc.wait(timeout=0.2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def obter_bandas(self) -> tuple[float, float, float, float]:
+        with self._lock:
+            return self._bandas
+
+    @property
+    def ativo_com_som(self) -> bool:
+        with self._lock:
+            return self._ativo_com_som
+
+
 class EqualizadorArea(Gtk.DrawingArea):
     """Visualizador de equalizador de áudio vetorial (Cairo) com 4 barras arredondadas fluidas.
 
-    Cada barra possui sua própria mola física independente (resposta ~0.18s, amortecimento ~0.72)
-    que reage dinamicamente simulando a batida da música a 144Hz.
+    Sincronizado em tempo real com o espectro de áudio do PipeWire através de 4 molas
+    físicas independentes (resposta ~0.12s-0.14s, amortecimento ~0.70) a 144Hz.
     """
 
     def __init__(self) -> None:
@@ -197,10 +369,10 @@ class EqualizadorArea(Gtk.DrawingArea):
 
         # 4 barras com molas físicas independentes
         self._molas = [
-            Mola(0.20, resposta=0.18, amortecimento=0.72),
-            Mola(0.20, resposta=0.16, amortecimento=0.70),
-            Mola(0.20, resposta=0.19, amortecimento=0.75),
-            Mola(0.20, resposta=0.17, amortecimento=0.72),
+            Mola(0.20, resposta=0.12, amortecimento=0.70),
+            Mola(0.20, resposta=0.13, amortecimento=0.72),
+            Mola(0.20, resposta=0.14, amortecimento=0.72),
+            Mola(0.20, resposta=0.12, amortecimento=0.68),
         ]
         self._alvos_tempo = 0.0
         self._cor_rgb = (0.796, 0.651, 0.969)  # Mauve Catppuccin padrão (203, 166, 247)
@@ -209,6 +381,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._mudo = False
         self._tick_id = 0
         self._ult_t = None
+        self._capturador = CapturadorEspectro()
 
         self.set_draw_func(self._desenhar)
 
@@ -224,6 +397,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._mudo = mudo
 
         if ativo and not pausado and not mudo:
+            self._capturador.iniciar()
             if not self._tick_id:
                 self._ult_t = None
                 try:
@@ -231,6 +405,7 @@ class EqualizadorArea(Gtk.DrawingArea):
                 except Exception:
                     self._tick_id = 0
         else:
+            self._capturador.parar()
             # Em pausa ou mudo: direciona suavemente as barras para repouso
             alvo = 0.20 if pausado else (0.10 if mudo else 0.0)
             for m in self._molas:
@@ -242,28 +417,42 @@ class EqualizadorArea(Gtk.DrawingArea):
                 except Exception:
                     self._tick_id = 0
 
+    def atualizar_sink(self) -> None:
+        """Notifica o capturador caso o dispositivo de saída tenha mudado."""
+        if hasattr(self, "_capturador"):
+            sink_novo = self._capturador._obter_sink_monitor()
+            if sink_novo and sink_novo != self._capturador._sink_atual and self._ativo:
+                self._capturador.parar()
+                self._capturador.iniciar(sink_novo)
+
     def _passo(self, _widget, clock) -> bool:
         t = (clock.get_frame_time() / 1e6) if clock is not None else time.monotonic()
         dt = 0.0 if self._ult_t is None else t - self._ult_t
         self._ult_t = t
         dt = min(dt, 1.0 / 30.0)
 
-        # Se tocando, gera metas de altura dinâmicas a cada ~110 ms
+        # Se tocando, alimenta as molas com as bandas do espectro de áudio real
         if self._ativo and not self._pausado and not self._mudo:
-            if t - self._alvos_tempo > 0.11:
-                self._alvos_tempo = t
-                padroes = [
-                    (0.85, 0.45, 0.95, 0.60),
-                    (0.40, 0.90, 0.55, 0.85),
-                    (0.70, 0.35, 0.80, 0.50),
-                    (0.95, 0.75, 0.40, 0.90),
-                    (0.50, 0.85, 0.70, 0.35),
-                ]
-                idx = int((t * 9) % len(padroes))
-                base = padroes[idx]
+            bandas = self._capturador.obter_bandas()
+            if self._capturador.ativo_com_som:
                 for i, m in enumerate(self._molas):
-                    jitter = random.uniform(-0.08, 0.08)
-                    m.ir_para(max(0.18, min(1.0, base[i] + jitter)))
+                    m.ir_para(bandas[i])
+            else:
+                # Fallback suave ou silêncio na música
+                if t - self._alvos_tempo > 0.11:
+                    self._alvos_tempo = t
+                    padroes = [
+                        (0.85, 0.45, 0.95, 0.60),
+                        (0.40, 0.90, 0.55, 0.85),
+                        (0.70, 0.35, 0.80, 0.50),
+                        (0.95, 0.75, 0.40, 0.90),
+                        (0.50, 0.85, 0.70, 0.35),
+                    ]
+                    idx = int((t * 9) % len(padroes))
+                    base = padroes[idx]
+                    for i, m in enumerate(self._molas):
+                        jitter = random.uniform(-0.06, 0.06)
+                        m.ir_para(max(0.18, min(1.0, base[i] + jitter)))
 
         todas_assentadas = True
         for m in self._molas:
@@ -4663,6 +4852,8 @@ class Ilha:
         ant_mudo = self._mudo
         self._vol = self.volume.valor
         self._mudo = self.volume.mudo
+        if hasattr(self, "eq_area"):
+            self.eq_area.atualizar_sink()
         if self._expandido:
             self._mostrar_sistema()
         if self._pronto and (ant_vol != self._vol or ant_mudo != self._mudo):

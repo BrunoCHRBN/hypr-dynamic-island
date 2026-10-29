@@ -7,6 +7,7 @@ from .sistema import FonteSistema
 from .rede import FonteRede
 from .kde import FonteKde
 from .hypr import FonteHypr
+from .espectro import CapturadorEspectro
 
 __all__ = [
     "Fonte",
@@ -16,6 +17,7 @@ __all__ = [
     "FonteRede",
     "FonteKde",
     "FonteHypr",
+    "CapturadorEspectro",
     "escolher_cor",
     "CACHE_ART",
 ]
