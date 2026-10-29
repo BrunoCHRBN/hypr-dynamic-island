@@ -16,16 +16,35 @@ def enviar_comando(payload: dict) -> dict:
         print(f"Erro: Socket da Dynamic Island não encontrado ({SOCKET_PATH}). O serviço está rodando?", file=sys.stderr)
         sys.exit(1)
 
+    # 1. Tenta STREAM (JSON-RPC bidirecional)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(2.5)
+            s.settimeout(0.6)
             s.connect(SOCKET_PATH)
             mensagem = json.dumps(payload) + "\n"
             s.sendall(mensagem.encode("utf-8"))
             resposta = s.recv(8192).decode("utf-8").strip()
-            if not resposta:
-                return {"status": "ok"}
-            return json.loads(resposta)
+            if resposta:
+                return json.loads(resposta)
+            return {"status": "ok"}
+    except Exception:
+        pass
+
+    # 2. Fallback DGRAM (Daemon monolítico)
+    try:
+        acao = payload.get("acao", "")
+        p_dgram = dict(payload)
+        p_dgram["action"] = acao
+        if acao == "toggle":
+            p_dgram["action"] = "toggle"
+        elif acao == "dnd":
+            p_dgram["action"] = "dnd_toggle"
+        elif acao == "page":
+            p_dgram["name"] = payload.get("nome", "midia")
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.sendto(json.dumps(p_dgram).encode("utf-8"), SOCKET_PATH)
+            return {"status": "ok"}
     except Exception as e:
         print(f"Erro ao comunicar com a Dynamic Island: {e}", file=sys.stderr)
         sys.exit(1)

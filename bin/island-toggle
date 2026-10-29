@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
-# Alterna a Dynamic Island entre recolhida e expandida.
+# Alterna a ilha entre presa-aberta e recolhida (via IPC com fallback para SIGUSR1).
+# Serve para bindar numa tecla: bind = $mainMod, B, exec, ~/.local/bin/island-toggle
 set -euo pipefail
-
-BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISLANDCTL="$BIN_DIR/islandctl"
-if [ ! -x "$ISLANDCTL" ]; then
-    ISLANDCTL="$(command -v islandctl 2>/dev/null || true)"
-fi
-
-if [ -n "$ISLANDCTL" ] && [ -x "$ISLANDCTL" ]; then
-    exec "$ISLANDCTL" toggle
-fi
 
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 sock="${rt}/island.sock"
+
 if [ -S "$sock" ]; then
     python3 -c '
 import socket, json
 try:
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(1.0)
-        s.connect("'"$sock"'")
-        s.sendall(b"{\"acao\": \"toggle\"}\n")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.sendto(json.dumps({"action": "toggle"}).encode("utf-8"), "'"$sock"'")
+    s.close()
 except Exception:
     pass
 '
 else
-    pid=$(ps -eo pid,comm,args --no-headers | awk '$2=="python3" && $0 ~ /island/ {print $1; exit}')
+    pid=$(ps -eo pid,comm,args --no-headers | awk '$2=="python3" && $0 ~ /island\.py/ {print $1; exit}')
     [ -n "$pid" ] && kill -USR1 "$pid"
 fi

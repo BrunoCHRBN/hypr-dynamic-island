@@ -8,17 +8,4 @@ elif [ -f /usr/lib64/libgtk4-layer-shell.so ]; then
     export LD_PRELOAD=/usr/lib64/libgtk4-layer-shell.so
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PYTHONPATH="$SCRIPT_DIR/src:${PYTHONPATH:-}"
-
-if [ -f "$HOME/.config/hypr/scripts/island/app.py" ]; then
-    export PYTHONPATH="$HOME/.config/hypr/scripts:${PYTHONPATH:-}"
-    exec python3 -u -m island.app "$@"
-elif [ -f "$SCRIPT_DIR/src/island/app.py" ]; then
-    export PYTHONPATH="$SCRIPT_DIR/src:${PYTHONPATH:-}"
-    exec python3 -u -m island.app "$@"
-elif [ -f "$HOME/.config/hypr/scripts/island.py" ]; then
-    exec python3 -u "$HOME/.config/hypr/scripts/island.py" "$@"
-else
-    exec python3 -u -m island.app "$@"
-fi
+exec python3 -u "$HOME/.config/hypr/scripts/island.py" "$@"

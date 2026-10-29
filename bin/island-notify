@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""island-notify — Envia notificações e alertas diretamente para a Dynamic Island."""
+"""island-notify — Envia notificações e alertas diretamente para a Dynamic Island.
 
+Pode ser executado diretamente por scripts, terminal ou chamado pelo Dunst via dunstrc.
+"""
 import os
 import sys
 import json
@@ -11,7 +13,7 @@ def main():
     app = os.environ.get("DUNST_APP_NAME", "")
     summary = os.environ.get("DUNST_SUMMARY", "")
     body = os.environ.get("DUNST_BODY", "")
-    urgency = os.environ.get("DUNST_URGENCY", "normal").lower()
+    urgency = os.environ.get("DUNST_URGENCY", "NORMAL")
 
     if len(sys.argv) > 1:
         if len(sys.argv) == 2:
@@ -25,7 +27,7 @@ def main():
             summary = summary or sys.argv[2]
             body = body or sys.argv[3]
             if len(sys.argv) >= 6 and not os.environ.get("DUNST_URGENCY"):
-                urgency = sys.argv[5].lower()
+                urgency = sys.argv[5]
 
     app = (app or "Sistema").strip()
     summary = (summary or "").strip()
@@ -36,23 +38,23 @@ def main():
 
     rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     sock_path = f"{rt}/island.sock"
+
     if not os.path.exists(sock_path):
         sys.exit(0)
 
     payload = {
-        "acao": "notify",
+        "action": "notify",
         "app": app,
-        "titulo": summary,
-        "corpo": body,
-        "urgencia": urgency,
-        "duracao_ms": 3500,
+        "summary": summary,
+        "body": body,
+        "urgency": urgency,
+        "duration": 3500,
     }
 
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            s.connect(sock_path)
-            s.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(json.dumps(payload).encode("utf-8"), sock_path)
+        s.close()
     except Exception:
         pass
 

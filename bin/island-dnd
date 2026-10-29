@@ -4,14 +4,20 @@
 # ==============================================================================
 set -euo pipefail
 
-BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISLANDCTL="$BIN_DIR/islandctl"
-if [ ! -x "$ISLANDCTL" ]; then
-    ISLANDCTL="$(command -v islandctl 2>/dev/null || true)"
-fi
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+sock="${rt}/island.sock"
 
-if [ -n "$ISLANDCTL" ] && [ -x "$ISLANDCTL" ]; then
-    exec "$ISLANDCTL" dnd toggle
+if [ -S "$sock" ]; then
+    python3 -c '
+import socket, json
+try:
+    sock = "'"$sock"'"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.sendto(json.dumps({"action": "dnd_toggle"}).encode("utf-8"), sock)
+    s.close()
+except Exception:
+    pass
+'
+else
+    dunstctl set-paused toggle || true
 fi
-
-dunstctl set-paused toggle || true
