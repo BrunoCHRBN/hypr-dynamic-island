@@ -14,6 +14,7 @@ from .atividade import (
 )
 from .cena import Cena, resolver_cena
 from .config import carregar_config, CONFIG_PADRAO
+from .mola import Mola
 
 __all__ = [
     "Atividade",
@@ -23,6 +24,7 @@ __all__ = [
     "resolver_cena",
     "carregar_config",
     "CONFIG_PADRAO",
+    "Mola",
     "PRIORIDADE_HUD",
     "PRIORIDADE_NOTIFICACAO",
     "PRIORIDADE_PRIVACIDADE",

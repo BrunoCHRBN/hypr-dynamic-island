@@ -31,8 +31,14 @@ class FonteVolume(Fonte):
         if self._proc:
             try:
                 self._proc.terminate()
+                self._proc.wait(timeout=0.2)
             except Exception:
                 pass
+            if self._proc.stdout:
+                try:
+                    self._proc.stdout.close()
+                except Exception:
+                    pass
             self._proc = None
 
     def _ler(self) -> Tuple[Optional[int], bool]:
