@@ -6,11 +6,10 @@ window { background: transparent; }
   border-radius: 17px;
   padding: 5px 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  transition: border-color 300ms ease, box-shadow 300ms ease, border-radius 350ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 300ms ease, box-shadow 300ms ease;
 }
 
 #ilha.expandido {
-  border-radius: 28px;
 }
 
 #ilha.fixado {
@@ -580,14 +579,15 @@ button.acao-btn.dnd-ativo:hover {
   min-width: 34px;
 }
 #hud-barra > trough {
-  min-height: 6px;
-  border-radius: 3px;
+  min-height: 8px;
+  border-radius: 4px;
   background-color: #313244;
 }
 #hud-barra > trough > progress {
-  min-height: 6px;
-  border-radius: 3px;
+  min-height: 8px;
+  border-radius: 4px;
   background-color: #cba6f7;
+  transition: none;
 }
 
 /* HUD transitório de Notificação (Estilo Dynamic Island) */

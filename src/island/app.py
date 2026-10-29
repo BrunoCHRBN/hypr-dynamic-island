@@ -254,6 +254,21 @@ class DynamicIslandApp:
                 Gdk.Display.get_default(), prov,
                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
+        self._prov_geometria = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self._prov_geometria,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 20
+        )
+        self._ultimo_raio = None
+        self._aplicar_raio(17)
+
+    def _aplicar_raio(self, r: int) -> None:
+        if r == getattr(self, "_ultimo_raio", None):
+            return
+        self._ultimo_raio = r
+        css = f"#ilha {{ border-radius: {r}px; }}".encode("utf-8")
+        if hasattr(self, "_prov_geometria"):
+            self._prov_geometria.load_from_data(css)
 
     def _conectar_fontes(self) -> None:
         pass
@@ -394,11 +409,18 @@ class DynamicIslandApp:
         self.pilula.set_size_request(w, h)
         self.win.set_default_size(w, h)
 
+        h_col = 34
+        h_exp = 220
+        progresso = max(0.0, min(1.0, (self._mola_h.x - h_col) / max(1.0, h_exp - h_col)))
+        r = max(14, min(28, round(17.0 + 11.0 * progresso)))
+        self._aplicar_raio(r)
+
         if ok_w and ok_h:
             w_final = round(self._mola_w.alvo)
             h_final = round(self._mola_h.alvo)
             self.pilula.set_size_request(w_final, h_final)
             self.win.set_default_size(w_final, h_final)
+            self._aplicar_raio(28 if self._expandido else 17)
             self._tick_id = 0
             self._ult_frame_time = None
             return GLib.SOURCE_REMOVE

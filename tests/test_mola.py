@@ -73,6 +73,31 @@ class TestMola(unittest.TestCase):
         self.assertEqual(m.x, 32.0)
         self.assertEqual(m.v, 0.0)
 
+    def test_mola_volume_snappy(self):
+        """Verifica a convergência rápida e elástica da mola de volume a 144Hz."""
+        m_vol = Mola(0.50, resposta=0.18, amortecimento=0.72)
+        m_vol.ir_para(0.80)
+        dt = 1.0 / 144.0
+        frames = 0
+        while not m_vol.passo(dt):
+            frames += 1
+            self.assertLess(frames, 60, "Mola de volume deve assentar em menos de ~300ms a 144Hz")
+        self.assertEqual(m_vol.x, 0.80)
+
+    def test_interpolacao_raio_borda(self):
+        """Verifica que a fórmula de interpolação do raio mapeia perfeitamente 17px -> 28px."""
+        def calc_raio(progresso: float) -> int:
+            p = max(0.0, min(1.0, progresso))
+            return max(14, min(28, round(17.0 + 11.0 * p)))
+
+        self.assertEqual(calc_raio(0.0), 17)
+        self.assertEqual(calc_raio(1.0), 28)
+        self.assertEqual(calc_raio(0.5), 22)
+        # Monotônico crescente
+        valores = [calc_raio(i / 100.0) for i in range(101)]
+        for i in range(len(valores) - 1):
+            self.assertLessEqual(valores[i], valores[i + 1])
+
     def test_protecao_engasgo_dt_grande(self):
         """Um congelamento longo (ex: 500ms) não deve explodir a física (clamp em 1/30)."""
         m = Mola(100.0, resposta=0.42, amortecimento=0.75)

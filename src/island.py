@@ -1910,7 +1910,7 @@ class Ilha:
         self._cor_dinamica_pendente = None
         self._historico_cache = []
         self._carregando_historico = False
-        self._mola_vol = Mola(0.0, resposta=0.22, amortecimento=0.82)
+        self._mola_vol = Mola(0.0, resposta=0.18, amortecimento=0.72)
         self._vol_tick_id = 0
         self._ult_t_vol = None
         self._hud_ativo = False
@@ -2787,6 +2787,13 @@ class Ilha:
             self.win.get_display(), self._css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self._iniciar_monitor_css()
 
+        # Provider de alta prioridade para interpolação contínua de raio de borda pela mola física
+        self._prov_geometria = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(
+            self.win.get_display(), self._prov_geometria, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 20)
+        self._ultimo_raio = None
+        self._aplicar_raio(17)
+
         self.win.present()
 
         self.atualizar()
@@ -3023,6 +3030,9 @@ class Ilha:
         #eq.dinamico {{
             color: {hex_cor};
         }}
+        #hud-barra > trough > progress {{
+            background-color: {hex_cor};
+        }}
         """
         if not hasattr(self, "_prov_dinamico"):
             self._prov_dinamico = Gtk.CssProvider()
@@ -3035,6 +3045,15 @@ class Ilha:
             self.eq_area.definir_cor(r, g, b)
         if hasattr(self, "anel_progresso"):
             self.anel_progresso.definir_cor(r, g, b)
+
+    def _aplicar_raio(self, r: int) -> None:
+        """Aplica o raio de borda dinamicamente a cada tick da mola física sem engasgos."""
+        if r == getattr(self, "_ultimo_raio", None):
+            return
+        self._ultimo_raio = r
+        css = f"#ilha {{ border-radius: {r}px; }}".encode("utf-8")
+        if hasattr(self, "_prov_geometria"):
+            self._prov_geometria.load_from_data(css)
 
     def _aplicar_conteudo(self) -> None:
         """Reajusta visibilidade dos elementos da ilha de acordo com o estado do player."""
@@ -3393,6 +3412,11 @@ class Ilha:
         progresso = max(0.0, min(1.0, (self._mola_h.x - h_col) / max(1.0, h_exp - h_col)))
         self._coreografar_progresso(progresso)
 
+        # Interpolação contínua do raio de borda acoplada à mola de altura a 144Hz
+        r_calc = 17.0 + 11.0 * progresso
+        r = max(14, min(28, round(r_calc)))
+        self._aplicar_raio(r)
+
         if ok:
             w_final = round(self._mola_w.alvo)
             h_final = round(self._mola_h.alvo)
@@ -3400,6 +3424,7 @@ class Ilha:
             self.win.set_default_size(w_final, h_final)
             self._ultimo_w = w_final
             self._ultimo_h = h_final
+            self._aplicar_raio(28 if self._expandido else 17)
 
             if not self._expandido:
                 self.revelador.set_visible(False)
@@ -4888,6 +4913,10 @@ class Ilha:
             self._mostrar_sistema()
         if self._pronto and (ant_vol != self._vol or ant_mudo != self._mudo):
             self._mostrar_hud_volume()
+        elif not self._pronto:
+            alvo_frac = 0.0 if self._mudo else min(1.0, max(0.0, (self._vol or 0) / 100.0))
+            self._mola_vol.x = alvo_frac
+            self._mola_vol.alvo = alvo_frac
         self._sincronizar_eq()
 
     def _mostrar_sistema(self) -> None:
@@ -4910,12 +4939,19 @@ class Ilha:
         if hasattr(self, "sys_val_mem"):
             self.sys_val_mem.set_text(f"{self._mem}%")
 
-        # Volume
+        # Volume (animado via física de mola)
         vol = self._vol if self._vol is not None else 0
         mudo = self._mudo
-        vol_frac = max(0.0, min(1.0, vol / 100.0))
-        if hasattr(self, "sys_barra_vol"):
-            self.sys_barra_vol.set_fraction(vol_frac)
+        vol_frac = 0.0 if mudo else max(0.0, min(1.0, vol / 100.0))
+        self._mola_vol.ir_para(vol_frac)
+        if not getattr(self, "_tick_vol_id", 0):
+            self._ult_t_vol = None
+            try:
+                self._tick_vol_id = self.win.add_tick_callback(self._passo_mola_vol)
+            except Exception:
+                self._tick_vol_id = 0
+                if hasattr(self, "sys_barra_vol"):
+                    self.sys_barra_vol.set_fraction(vol_frac)
         if hasattr(self, "sys_val_vol"):
             self.sys_val_vol.set_text("Mudo" if mudo else f"{vol}%")
         if hasattr(self, "sys_icone_vol"):
