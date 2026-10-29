@@ -27,6 +27,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self.set_size_request(22, 16)
         self.set_valign(Gtk.Align.CENTER)
         self.set_halign(Gtk.Align.CENTER)
+        self.set_visible(False)
 
         # 4 barras com molas físicas independentes rápidas e elásticas
         self._molas = [
@@ -56,6 +57,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._ativo = ativo
         self._pausado = pausado
         self._mudo = mudo
+        self.set_visible(ativo or pausado)
 
         if ativo and not pausado and not mudo:
             self._capturador.iniciar()

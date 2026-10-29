@@ -95,6 +95,9 @@ window { background: transparent; }
   font-size: 12px;
   font-feature-settings: "tnum";
 }
+#eq-area {
+  margin-left: 2px;
+}
 #pin-icone {
   color: #cba6f7;
   font-size: 11px;

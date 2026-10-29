@@ -292,14 +292,16 @@ class DynamicIslandApp:
             if d and (d.get("titulo") or d.get("art")):
                 tocando = (d.get("status") == "Playing")
                 eq_txt = " ▂▃" if tocando else (" ▂ " if d.get("status") == "Paused" else "")
+                hora = time.strftime("%H:%M")
+                txt_trailing = f"{hora}  {eq_txt}".strip() if eq_txt else hora
                 ativ_midia = Atividade(
                     id="midia",
                     prioridade=PRIORIDADE_MIDIA,
                     leading=SlotItem(tipo="capa", valor=d.get("art")),
                     center=SlotItem(tipo="texto", valor=d.get("titulo")),
-                    trailing=SlotItem(tipo="equalizador", valor=eq_txt, css_class="dinamico"),
+                    trailing=SlotItem(tipo="texto", valor=txt_trailing, css_class="relogio-eq"),
                     progresso=0.0 if d.get("duracao", 0) <= 0 else (self.fonte_mpris.posicao_estimada() / d["duracao"]),
-                    largura_alvo=340,
+                    largura_alvo=360,
                     dados=d,
                 )
                 self.atividades.adicionar(ativ_midia)

@@ -388,6 +388,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self.set_size_request(22, 16)
         self.set_valign(Gtk.Align.CENTER)
         self.set_halign(Gtk.Align.CENTER)
+        self.set_visible(False)
 
         # 4 barras com molas físicas independentes
         self._molas = [
@@ -417,6 +418,7 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._ativo = ativo
         self._pausado = pausado
         self._mudo = mudo
+        self.set_visible(ativo or pausado)
 
         if ativo and not pausado and not mudo:
             self._capturador.iniciar()
@@ -591,7 +593,7 @@ class AnelProgresso(Gtk.DrawingArea):
             cr.stroke()
 
 
-LARGURA = 340                       # com mídia (capa + título + controles)
+LARGURA = 360                       # com mídia (capa + título + relógio + equalizador)
 LARGURA_VAZIA = 175                 # sem mídia: recolhida (cápsula compacta precisa)
 LARGURA_EXPANDIDA_VAZIA = 340       # sem mídia: expandida (painel hero consistente)
 ALTURA_CABECALHO = 32
@@ -2084,17 +2086,17 @@ class Ilha:
         self.slot_trailing.set_transition_duration(180)
         self.slot_trailing.set_valign(Gtk.Align.CENTER)
 
-        trailing_relogio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        trailing_relogio_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         trailing_relogio_box.append(self.mic_indicador)
         trailing_relogio_box.append(self.rec_indicador)
         trailing_relogio_box.append(self.relogio)
+        trailing_relogio_box.append(self.eq_area)
         trailing_relogio_box.append(self.dnd_icone)
         trailing_relogio_box.append(self.pin_icone)
 
         trailing_vazio = Gtk.Box()
         self.slot_trailing.add_named(trailing_vazio, "vazio")
         self.slot_trailing.add_named(trailing_relogio_box, "relogio")
-        self.slot_trailing.add_named(self.eq_area, "eq")
         self.slot_trailing.add_named(self.ativ_badge, "atividade")
 
         cabecalho = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -2964,10 +2966,9 @@ class Ilha:
                 else:
                     self.slot_leading.set_visible_child_name("dots")
                 self.slot_center.set_visible_child_name("titulo")
-                if tocando or pausado:
-                    self.slot_trailing.set_visible_child_name("eq")
-                else:
-                    self.slot_trailing.set_visible_child_name("relogio")
+                if hasattr(self, "eq_area"):
+                    self.eq_area.set_visible(bool(tocando or pausado))
+                self.slot_trailing.set_visible_child_name("relogio")
 
                 prog_visivel = bool(not self._expandido and not getattr(self, "_hud_ativo", False) and not getattr(self, "_notif_ativa", False))
                 if hasattr(self, "pilula_progresso"):
@@ -2976,6 +2977,8 @@ class Ilha:
                 # Repouso total
                 self.slot_leading.set_visible_child_name("dots")
                 self.slot_center.set_visible_child_name("vazio")
+                if hasattr(self, "eq_area"):
+                    self.eq_area.set_visible(False)
                 self.slot_trailing.set_visible_child_name("relogio")
                 if hasattr(self, "pilula_progresso"):
                     self.pilula_progresso.set_visible(False)
