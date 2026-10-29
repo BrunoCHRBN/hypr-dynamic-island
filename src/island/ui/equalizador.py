@@ -92,14 +92,19 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._ult_t = t
         dt = min(dt, 1.0 / 30.0)
 
-        # Se tocando, alimenta as molas com as bandas reais do espectro de áudio
+        # Se tocando, alimenta as molas com as bandas reais do espectro de áudio da música/vídeo
         if self._ativo and not self._pausado and not self._mudo:
-            bandas = self._capturador.obter_bandas()
-            if self._capturador.ativo_com_som:
-                for i, m in enumerate(self._molas):
-                    m.ir_para(bandas[i])
+            if self._capturador and self._capturador.rodando:
+                bandas = self._capturador.obter_bandas()
+                if self._capturador.ativo_com_som:
+                    for i, m in enumerate(self._molas):
+                        m.ir_para(bandas[i])
+                else:
+                    # Silêncio na reprodução da mídia: repouso suave na linha de base
+                    for m in self._molas:
+                        m.ir_para(0.18)
             else:
-                # Fallback suave ou silêncio na música
+                # Fallback de ritmo procedural caso a captura não esteja disponível
                 if t - self._alvos_tempo > 0.11:
                     self._alvos_tempo = t
                     padroes = [

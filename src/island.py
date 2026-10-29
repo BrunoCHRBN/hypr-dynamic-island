@@ -47,6 +47,7 @@ import locale
 import math
 import os
 import random
+import shutil
 import signal
 import socket
 import struct
@@ -232,17 +233,19 @@ class CapturadorEspectro:
             step <<= 1
         return a
 
-    def _obter_sink_monitor(self) -> Optional[str]:
+    def _obter_sink_monitor(self) -> str:
+        """Obtém o nome do sink padrão para capturar o áudio de reprodução (música/vídeo)."""
         try:
             res = subprocess.run(
                 ["pactl", "get-default-sink"],
                 capture_output=True, text=True, timeout=0.3
             )
             if res.returncode == 0 and res.stdout.strip():
-                return f"{res.stdout.strip()}.monitor"
+                sink = res.stdout.strip()
+                return sink if sink.endswith(".monitor") else f"{sink}.monitor"
         except Exception:
             pass
-        return None
+        return "@DEFAULT_MONITOR@"
 
     def iniciar(self, sink_monitor: Optional[str] = None) -> None:
         if self._rodando:
@@ -257,15 +260,30 @@ class CapturadorEspectro:
         self._thread.start()
 
     def _loop_captura(self, target: str) -> None:
-        cmd = [
-            "pw-record",
-            "--rate", str(self.taxa),
-            "--channels", "1",
-            "--format", "s16",
-            "--latency", "32ms",
-            "--target", target,
-            "-",
-        ]
+        tem_parec = shutil.which("parec") is not None
+        if tem_parec:
+            cmd = [
+                "parec",
+                "-d", target,
+                f"--rate={self.taxa}",
+                "--channels=1",
+                "--format=s16le",
+                "--latency-msec=32",
+                "--raw",
+            ]
+        else:
+            sink_puro = target.removesuffix(".monitor")
+            cmd = [
+                "pw-record",
+                "-P", "{ stream.capture.sink = true }",
+                "--rate", str(self.taxa),
+                "--channels", "1",
+                "--format", "s16",
+                "--latency", "32ms",
+            ]
+            if sink_puro and sink_puro != "@DEFAULT_MONITOR@":
+                cmd.extend(["--target", sink_puro])
+            cmd.append("-")
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except Exception:
@@ -352,6 +370,10 @@ class CapturadorEspectro:
         with self._lock:
             return self._ativo_com_som
 
+    @property
+    def rodando(self) -> bool:
+        return self._rodando
+
 
 class EqualizadorArea(Gtk.DrawingArea):
     """Visualizador de equalizador de áudio vetorial (Cairo) com 4 barras arredondadas fluidas.
@@ -431,14 +453,19 @@ class EqualizadorArea(Gtk.DrawingArea):
         self._ult_t = t
         dt = min(dt, 1.0 / 30.0)
 
-        # Se tocando, alimenta as molas com as bandas do espectro de áudio real
+        # Se tocando, alimenta as molas com as bandas reais do espectro de áudio da música/vídeo
         if self._ativo and not self._pausado and not self._mudo:
-            bandas = self._capturador.obter_bandas()
-            if self._capturador.ativo_com_som:
-                for i, m in enumerate(self._molas):
-                    m.ir_para(bandas[i])
+            if self._capturador and self._capturador.rodando:
+                bandas = self._capturador.obter_bandas()
+                if self._capturador.ativo_com_som:
+                    for i, m in enumerate(self._molas):
+                        m.ir_para(bandas[i])
+                else:
+                    # Silêncio na reprodução da mídia: repouso suave na linha de base
+                    for m in self._molas:
+                        m.ir_para(0.18)
             else:
-                # Fallback suave ou silêncio na música
+                # Fallback de ritmo procedural caso a captura não esteja disponível
                 if t - self._alvos_tempo > 0.11:
                     self._alvos_tempo = t
                     padroes = [

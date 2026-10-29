@@ -52,11 +52,17 @@ def main():
     }
 
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        s.sendto(json.dumps(payload).encode("utf-8"), sock_path)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(sock_path)
+        s.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         s.close()
     except Exception:
-        pass
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            s.sendto(json.dumps(payload).encode("utf-8"), sock_path)
+            s.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

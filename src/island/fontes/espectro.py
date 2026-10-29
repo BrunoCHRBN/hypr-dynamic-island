@@ -3,6 +3,7 @@
 from __future__ import annotations
 import math
 import os
+import shutil
 import struct
 import subprocess
 import threading
@@ -64,18 +65,19 @@ class CapturadorEspectro:
             step <<= 1
         return a
 
-    def _obter_sink_monitor(self) -> Optional[str]:
-        """Obtém o nome do sink padrão atual para capturar o áudio do desktop."""
+    def _obter_sink_monitor(self) -> str:
+        """Obtém o nome do sink padrão para capturar o áudio de reprodução (música/vídeo)."""
         try:
             res = subprocess.run(
                 ["pactl", "get-default-sink"],
                 capture_output=True, text=True, timeout=0.3
             )
             if res.returncode == 0 and res.stdout.strip():
-                return f"{res.stdout.strip()}.monitor"
+                sink = res.stdout.strip()
+                return sink if sink.endswith(".monitor") else f"{sink}.monitor"
         except Exception:
             pass
-        return None
+        return "@DEFAULT_MONITOR@"
 
     def iniciar(self, sink_monitor: Optional[str] = None) -> None:
         """Inicia a captura em segundo plano se ainda não estiver ativa."""
@@ -91,15 +93,30 @@ class CapturadorEspectro:
         self._thread.start()
 
     def _loop_captura(self, target: str) -> None:
-        cmd = [
-            "pw-record",
-            "--rate", str(self.taxa),
-            "--channels", "1",
-            "--format", "s16",
-            "--latency", "32ms",
-            "--target", target,
-            "-",
-        ]
+        tem_parec = shutil.which("parec") is not None
+        if tem_parec:
+            cmd = [
+                "parec",
+                "-d", target,
+                f"--rate={self.taxa}",
+                "--channels=1",
+                "--format=s16le",
+                "--latency-msec=32",
+                "--raw",
+            ]
+        else:
+            sink_puro = target.removesuffix(".monitor")
+            cmd = [
+                "pw-record",
+                "-P", "{ stream.capture.sink = true }",
+                "--rate", str(self.taxa),
+                "--channels", "1",
+                "--format", "s16",
+                "--latency", "32ms",
+            ]
+            if sink_puro and sink_puro != "@DEFAULT_MONITOR@":
+                cmd.extend(["--target", sink_puro])
+            cmd.append("-")
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except Exception:
@@ -192,3 +209,7 @@ class CapturadorEspectro:
     def ativo_com_som(self) -> bool:
         with self._lock:
             return self._ativo_com_som
+
+    @property
+    def rodando(self) -> bool:
+        return self._rodando

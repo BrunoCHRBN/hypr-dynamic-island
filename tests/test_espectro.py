@@ -61,10 +61,16 @@ class TestCapturadorEspectroLifecycle(unittest.TestCase):
     def test_estado_inicial(self):
         capturador = CapturadorEspectro()
         self.assertFalse(capturador._rodando)
+        self.assertFalse(capturador.rodando)
         self.assertFalse(capturador.ativo_com_som)
         bandas = capturador.obter_bandas()
         self.assertEqual(len(bandas), 4)
         self.assertEqual(bandas, (0.16, 0.16, 0.16, 0.16))
+
+    def test_obter_sink_monitor_retorna_monitor(self):
+        capturador = CapturadorEspectro()
+        sink = capturador._obter_sink_monitor()
+        self.assertTrue(sink.endswith(".monitor") or sink == "@DEFAULT_MONITOR@")
 
     def test_parar_reseta_bandas(self):
         capturador = CapturadorEspectro()
